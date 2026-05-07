@@ -104,9 +104,27 @@ function start(port) {
   return server;
 }
 
+function buildRegisterAck(phone, replySerial, version2019) {
+  const ac = Buffer.from('ATTACH' + Date.now().toString(36), 'utf8');
+  const body = Buffer.alloc(3 + ac.length);
+  body.writeUInt16BE(replySerial, 0);
+  body[2] = 0;
+  ac.copy(body, 3);
+  return encode({ msgId: 0x8100, phone, serial: nextSerial(), body, version2019 });
+}
+
 function handleSignaling(socket, frame, openFiles, version2019) {
   const { msgId, phone, serial, body } = frame;
   switch (msgId) {
+    case 0x0100: { // device pre-alarm idle keep-alive on the attachment port
+      socket.write(buildRegisterAck(phone, serial, version2019));
+      log.debug(`pre-alarm register from ${phone} acked`);
+      return;
+    }
+    case 0x0102: case 0x0002: { // auth / heartbeat keep-alives on the attach port
+      socket.write(genericResponse(phone, serial, msgId, version2019));
+      return;
+    }
     case 0x1210: {
       // termId(7) alarmId(16) alarmNumber(32) infoType(1) attachmentCount(1) [name fileSize ...]
       let p = 0;

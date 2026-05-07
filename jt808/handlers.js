@@ -110,6 +110,18 @@ function handle(socket, frame) {
       log.info(`SET_PARAMS phone=${phone} heartbeat=${HEARTBEAT_INTERVAL}s tcpRespTimeout=${TCP_RESPONSE_TIMEOUT}s reconnect=${TCP_RECONNECT_TIMES}`);
       return;
     }
+    case 0x0001: { // terminal general response — ack to one of our platform messages
+      // body: replySerial(WORD) replyId(WORD) result(BYTE: 0=ok 1=fail 2=msg-error 3=not-supported)
+      if (body.length >= 5) {
+        const replySerial = body.readUInt16BE(0);
+        const replyId = body.readUInt16BE(2);
+        const result = body[4];
+        const resultName = ['ok','fail','msg-error','not-supported'][result] || `r${result}`;
+        log.info(`ACK phone=${phone} replyTo=0x${replyId.toString(16).padStart(4,'0')} serial=${replySerial} result=${resultName}`);
+        record('msg', { ...base, type: 'ack', parsed: { replyId: '0x' + replyId.toString(16).padStart(4,'0'), replySerial, result, resultName } });
+      }
+      return; // no platform reply for a terminal general response
+    }
     case 0x0002: { // heartbeat
       send(socket, `0x8001 heartbeat-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
       log.info(`HEARTBEAT phone=${phone}`);

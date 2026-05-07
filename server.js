@@ -25,6 +25,13 @@ const FTP_ROOT  = path.resolve(__dirname, 'ftp');
 if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
 if (!fs.existsSync(FTP_ROOT))  fs.mkdirSync(FTP_ROOT,  { recursive: true });
 
+// Devices probe ftp://server/ulv_mdvr2.0/upgrade.ini at boot looking for a firmware
+// upgrade. Provide an empty placeholder so they get a 0-byte file instead of ENOENT.
+const FW_DIR = path.join(FTP_ROOT, 'ulv_mdvr2.0');
+if (!fs.existsSync(FW_DIR)) fs.mkdirSync(FW_DIR, { recursive: true });
+const FW_INI = path.join(FW_DIR, 'upgrade.ini');
+if (!fs.existsSync(FW_INI)) fs.writeFileSync(FW_INI, '');
+
 // ---------- JT808 TCP server ----------
 const jt808 = net.createServer((socket) => {
   const peer = `${socket.remoteAddress}:${socket.remotePort}`;
