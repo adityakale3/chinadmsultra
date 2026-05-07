@@ -1,5 +1,5 @@
 const { encode } = require('./codec');
-const { parseLocation } = require('./parse-location');
+const { parseLocation, parseBulkLocation } = require('./parse-location');
 const store = require('../store');
 
 const ATTACHMENT_HOST = process.env.ATTACHMENT_HOST || '13.206.186.1';
@@ -107,7 +107,34 @@ function handle(socket, frame) {
     }
     case 0x0704: { // bulk locations
       socket.write(buildGeneralResponse(phone, serial, msgId, 0, v));
-      record('msg', { ...base, type: 'bulk_location', parsed: { hex: body.toString('hex') } });
+      const parsed = parseBulkLocation(body);
+      const anyAlarm = (parsed.items || []).some(it => (it.alarms && it.alarms.length) || (it.extras || []).some(x => x.kind));
+      record(anyAlarm ? 'alert' : 'msg', { ...base, type: 'bulk_location', parsed });
+      // If any inner item carries an ADAS/DSM/BSD extra, request the video evidence.
+      for (const it of parsed.items || []) {
+        const events = (it.extras || []).filter(x => x.kind);
+        if (!events.length) continue;
+        // Re-extract raw extras region from inside the bulk body is messy; re-walk the inner item buffer instead.
+        // We don't have direct access here, so we trigger the request using a synthesized alarmId.
+        for (const ev of events) {
+          if (!ev.alarmIdentification) continue;
+          const alarmIdBuf = Buffer.alloc(16);
+          Buffer.from(ev.alarmIdentification.termId.padEnd(7, '\0')).copy(alarmIdBuf, 0, 0, 7);
+          const alarmNumber32 = Buffer.alloc(32);
+          Buffer.from(`${phone}-${Date.now()}`).copy(alarmNumber32);
+          socket.write(build9208(phone, alarmIdBuf, alarmNumber32, v));
+          record('alert', {
+            phone, type: 'attachment_request', alarmKind: ev.kind,
+            eventName: ev.eventName, alarmIdentification: ev.alarmIdentification,
+          });
+        }
+      }
+      return;
+    }
+    case 0x0900: { // ULV transparent data uplink
+      socket.write(buildGeneralResponse(phone, serial, msgId, 0, v));
+      const subType = body[0];
+      record('msg', { ...base, type: 'transparent', parsed: { subType: '0x' + subType.toString(16), hex: body.toString('hex') } });
       return;
     }
     case 0x0801: case 0x0800: case 0x0805: { // legacy multimedia

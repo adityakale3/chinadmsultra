@@ -97,4 +97,20 @@ function parseLocation(body) {
   };
 }
 
-module.exports = { parseLocation, parseAlarmId };
+// 0x0704 bulk location: itemCount(WORD) type(BYTE) [ length(WORD) locationBody ]*
+function parseBulkLocation(body) {
+  if (body.length < 3) return { error: 'short' };
+  const count = body.readUInt16BE(0);
+  const dataType = body[2]; // 0 = normal batch, 1 = blind-area supplement
+  const items = [];
+  let p = 3;
+  while (p + 2 <= body.length && items.length < count) {
+    const len = body.readUInt16BE(p); p += 2;
+    if (p + len > body.length) break;
+    items.push(parseLocation(body.slice(p, p + len)));
+    p += len;
+  }
+  return { count, dataType, items };
+}
+
+module.exports = { parseLocation, parseBulkLocation, parseAlarmId };
