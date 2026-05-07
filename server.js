@@ -2,7 +2,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
-const FtpSrv = require('ftp-srv');
+const { FtpSrv, FileSystem } = require('ftp-srv');
 
 const { extractFrames, decode } = require('./jt808/codec');
 const handlers = require('./jt808/handlers');
@@ -84,20 +84,48 @@ const ftp = new FtpSrv({
   pasv_max: 30100,
   anonymous: true,
 });
+// FileSystem subclass: when device CWDs into a path that doesn't exist,
+// auto-create the directory tree. The device uploads video/photo evidence to
+// /Upload/<phone>/Video/<YYYY-MM-DD>/ and expects this to just work.
+class AutoMkdirFs extends FileSystem {
+  get(fileName) {
+    const target = path.join(this.cwd, fileName || '.');
+    const real = path.join(this.root, target);
+    if (!fs.existsSync(real)) {
+      try { fs.mkdirSync(real, { recursive: true }); flog.info(`auto-mkdir ${real}`); } catch {}
+    }
+    return super.get(fileName);
+  }
+  chdir(p) {
+    const target = path.resolve('/', this.cwd, p || '.');
+    const real = path.join(this.root, target);
+    if (!fs.existsSync(real)) {
+      try { fs.mkdirSync(real, { recursive: true }); flog.info(`auto-mkdir ${real}`); } catch {}
+    }
+    return super.chdir(p);
+  }
+}
+
 ftp.on('login', ({ connection, username }, resolve) => {
   flog.info(`login user=${username} ip=${connection.ip}`);
   connection.on('STOR', (error, fileName) => {
     if (error) { flog.warn(`STOR error ${fileName}: ${error.message}`); return; }
     try {
       const stat = fs.statSync(fileName);
-      const dest = path.join(MEDIA_DIR, path.basename(fileName));
+      const rel = path.relative(FTP_ROOT, fileName);
+      const parts = rel.split(path.sep);   // e.g. ["Upload","806072880208","Video","2026-05-06","xyz.mp4"]
+      const phone = parts[1] || username;
+      const safe = `${phone}_${parts.slice(2).join('_')}`.replace(/[^A-Za-z0-9._-]/g, '_');
+      const dest = path.join(MEDIA_DIR, safe);
       fs.copyFileSync(fileName, dest);
-      flog.info(`STOR ok ${path.basename(fileName)} size=${stat.size} -> ${dest}`);
-      store.media.push({ ts: new Date().toISOString(), source: 'ftp', user: username, fname: path.basename(fileName), size: stat.size, path: dest });
+      flog.info(`STOR ok ${rel} size=${stat.size} -> media/${safe}`);
+      store.media.push({ ts: new Date().toISOString(), source: 'ftp', phone, user: username, fname: path.basename(fileName), originalPath: rel, size: stat.size, path: dest });
+      store.alerts.push({ ts: new Date().toISOString(), phone, type: 'video_uploaded', source: 'ftp', fname: path.basename(fileName), size: stat.size, originalPath: rel });
     } catch (e) { flog.warn(`STOR copy failed: ${e.message}`); }
   });
   connection.on('RETR', (err, fname) => flog.info(`RETR ${fname}${err ? ' ERR ' + err.message : ''}`));
-  resolve({ root: FTP_ROOT });
+  const fsImpl = new AutoMkdirFs(connection, { root: FTP_ROOT, cwd: '/' });
+  resolve({ root: FTP_ROOT, fs: fsImpl });
 });
 ftp.listen().then(() => flog.info(`listening on :${FTP_PORT}, pasv ${PUBLIC_IP}:30000-30100`));
 
