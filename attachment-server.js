@@ -172,7 +172,10 @@ function handleSignaling(socket, frame, openFiles, version2019) {
       return;
     }
     default:
-      log.warn(`signal phone=${phone} unhandled 0x${msgId.toString(16)}`);
+      // Some firmwares treat port 7612 as a secondary CMS port and send normal JT808
+      // traffic here (heartbeats, bulk locations, transparent data). Ack and ignore —
+      // we only do real work for 0x1210/0x1211/0x1212 attachment messages.
+      log.debug(`signal phone=${phone} ignored 0x${msgId.toString(16).padStart(4,'0')} on attach port`);
       socket.write(genericResponse(phone, serial, msgId, version2019));
   }
 }
