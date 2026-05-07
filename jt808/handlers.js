@@ -29,6 +29,30 @@ function buildRegisterResponse(phone, replySerial, result, authCode, version2019
   return encode({ msgId: 0x8100, phone, serial: nextSerial(), body, version2019 });
 }
 
+// 0x8103 Set Terminal Parameters. body: paramCount(BYTE) [paramId(DWORD) len(BYTE) value]*
+// Heartbeat interval = paramId 0x0001 (DWORD seconds). Default per spec is 60 s.
+// We push HEARTBEAT_INTERVAL (default 20 s) to defeat carrier NAT idle-timeout.
+const HEARTBEAT_INTERVAL = Number(process.env.HEARTBEAT_INTERVAL || 20);
+const TCP_RESPONSE_TIMEOUT = Number(process.env.TCP_RESPONSE_TIMEOUT || 15);
+const TCP_RECONNECT_TIMES = Number(process.env.TCP_RECONNECT_TIMES || 3);
+
+function buildSetParams(phone, version2019) {
+  const params = [
+    [0x0001, HEARTBEAT_INTERVAL],     // heartbeat interval (s)
+    [0x001a, TCP_RESPONSE_TIMEOUT],   // tcp response timeout (s)
+    [0x001b, TCP_RECONNECT_TIMES],    // tcp reconnect attempts
+  ];
+  const head = Buffer.from([params.length]);
+  const chunks = params.map(([id, val]) => {
+    const b = Buffer.alloc(9);
+    b.writeUInt32BE(id, 0);
+    b[4] = 4;
+    b.writeUInt32BE(val, 5);
+    return b;
+  });
+  return encode({ msgId: 0x8103, phone, serial: nextSerial(), body: Buffer.concat([head, ...chunks]), version2019 });
+}
+
 // 0x9208 alarm-attachment upload command:
 //   ipLen(1) ip(STRING) tcpPort(WORD) udpPort(WORD) alarmId(16B) alarmNumber(32B) reserved(16B)
 function build9208(phone, alarmIdBuf, alarmNumber32, version2019) {
@@ -81,6 +105,9 @@ function handle(socket, frame) {
       send(socket, `0x8001 auth-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
       log.info(`AUTH phone=${phone} body="${body.toString('utf8').replace(/\0/g,'').replace(/[^\x20-\x7e]/g,'.')}"`);
       record('msg', { ...base, type: 'auth', parsed: { authBody: body.toString('utf8') } });
+      // Push shorter heartbeat interval so carrier NAT doesn't idle-timeout the connection.
+      send(socket, `0x8103 set-params phone=${phone} heartbeat=${HEARTBEAT_INTERVAL}s`, buildSetParams(phone, v));
+      log.info(`SET_PARAMS phone=${phone} heartbeat=${HEARTBEAT_INTERVAL}s tcpRespTimeout=${TCP_RESPONSE_TIMEOUT}s reconnect=${TCP_RECONNECT_TIMES}`);
       return;
     }
     case 0x0002: { // heartbeat
