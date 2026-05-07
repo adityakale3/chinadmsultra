@@ -7,6 +7,8 @@ const fs = require('fs');
 const path = require('path');
 const { extractFrames, decode, encode } = require('./jt808/codec');
 const store = require('./store');
+const { make } = require('./logger');
+const log = make('ATTACH');
 
 const MEDIA_DIR = path.resolve(__dirname, 'media');
 const BITSTREAM_MAGIC = Buffer.from([0x30, 0x31, 0x63, 0x64]);
@@ -40,12 +42,16 @@ function file9212(phone, fileName, fileType, version2019) {
 function start(port) {
   ensureDir();
   const server = net.createServer((socket) => {
+    const peer = `${socket.remoteAddress}:${socket.remotePort}`;
+    log.info(`+ connect ${peer}`);
+    socket.setKeepAlive(true, 30000);
     let buf = Buffer.alloc(0);
     const openFiles = new Map(); // fileName -> { fd, path, size, written }
     let phone = 'unknown';
     let version2019 = false;
 
     socket.on('data', (chunk) => {
+      log.debug(`<- ${peer} ${chunk.length}B`, chunk.length < 256 ? chunk.toString('hex') : chunk.slice(0,128).toString('hex')+'...(truncated)');
       buf = Buffer.concat([buf, chunk]);
 
       // Loop: a single TCP read may contain framed signaling AND raw bitstream packets.
@@ -88,11 +94,13 @@ function start(port) {
 
     socket.on('close', () => {
       for (const [, f] of openFiles) try { fs.closeSync(f.fd); } catch {}
+      log.info(`- close ${peer} openFiles=${openFiles.size}`);
     });
-    socket.on('error', () => {});
+    socket.on('error', (e) => log.warn(`socket_error ${peer}: ${e.message}`));
   });
 
-  server.listen(port, () => console.log(`[ATTACH] TCP listening on :${port}`));
+  server.listen(port, () => log.info(`TCP listening on :${port}`));
+  server.on('error', (e) => log.error(`server error: ${e.message}`));
   return server;
 }
 
@@ -114,6 +122,7 @@ function handleSignaling(socket, frame, openFiles, version2019) {
         files.push({ fname, fsize });
       }
       socket.write(genericResponse(phone, serial, msgId, version2019));
+      log.info(`1210 phone=${phone} alarmId=${alarmId} files=${JSON.stringify(files)}`);
       store.messages.push({ ts: new Date().toISOString(), type: 'attach_1210', phone, termId, alarmId, alarmNumber, infoType, files });
       return;
     }
@@ -124,6 +133,7 @@ function handleSignaling(socket, frame, openFiles, version2019) {
       const fileType = body[1 + nl];
       const fileSize = body.readUInt32BE(2 + nl);
       socket.write(genericResponse(phone, serial, msgId, version2019));
+      log.info(`1211 phone=${phone} starting "${fname}" type=${fileType} size=${fileSize}`);
       store.messages.push({ ts: new Date().toISOString(), type: 'attach_1211', phone, fname, fileType, fileSize });
       return;
     }
@@ -138,10 +148,13 @@ function handleSignaling(socket, frame, openFiles, version2019) {
       if (f) { try { fs.closeSync(f.fd); } catch {}; openFiles.delete(fname); }
       socket.write(genericResponse(phone, serial, msgId, version2019));
       socket.write(file9212(phone, fname, fileType, version2019));
-      store.media.push({ ts: new Date().toISOString(), source: 'alarm_attachment', phone, fname, fileType, path: safe });
+      const wrote = f ? f.written : 0;
+      log.info(`1212 phone=${phone} done "${fname}" wroteBytes=${wrote} -> ${safe}`);
+      store.media.push({ ts: new Date().toISOString(), source: 'alarm_attachment', phone, fname, fileType, path: safe, bytes: wrote });
       return;
     }
     default:
+      log.warn(`signal phone=${phone} unhandled 0x${msgId.toString(16)}`);
       socket.write(genericResponse(phone, serial, msgId, version2019));
   }
 }
@@ -157,6 +170,7 @@ function writeChunk(phone, fileName, offset, payload, openFiles) {
   }
   fs.writeSync(f.fd, payload, 0, payload.length, offset);
   f.written += payload.length;
+  log.debug(`stream "${fileName}" off=${offset} len=${payload.length} total=${f.written}`);
 }
 
 module.exports = { start };

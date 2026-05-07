@@ -8,12 +8,17 @@ const { extractFrames, decode } = require('./jt808/codec');
 const handlers = require('./jt808/handlers');
 const attachmentServer = require('./attachment-server');
 const store = require('./store');
+const { make } = require('./logger');
 
 const HTTP_PORT       = Number(process.env.HTTP_PORT       || 3000);
 const JT808_PORT      = Number(process.env.JT808_PORT      || 7611);
 const ATTACHMENT_PORT = Number(process.env.ATTACHMENT_PORT || 7612);
-const FTP_PORT        = Number(process.env.FTP_PORT        || 21);
+const FTP_PORT        = Number(process.env.FTP_PORT        || 2121);
 const PUBLIC_IP       = process.env.PUBLIC_IP || '13.206.186.1';
+
+const log = make('JT808');
+const flog = make('FTP');
+const hlog = make('HTTP');
 
 const MEDIA_DIR = path.resolve(__dirname, 'media');
 const FTP_ROOT  = path.resolve(__dirname, 'ftp');
@@ -23,34 +28,48 @@ if (!fs.existsSync(FTP_ROOT))  fs.mkdirSync(FTP_ROOT,  { recursive: true });
 // ---------- JT808 TCP server ----------
 const jt808 = net.createServer((socket) => {
   const peer = `${socket.remoteAddress}:${socket.remotePort}`;
-  console.log(`[JT808] connect ${peer}`);
+  const connectedAt = Date.now();
+  log.info(`+ connect ${peer}`);
   socket.setKeepAlive(true, 30000);
   socket.setNoDelay(true);
   let buf = Buffer.alloc(0);
+  let frameCount = 0;
 
   socket.on('data', (chunk) => {
+    log.debug(`<- ${peer} ${chunk.length}B`, chunk.toString('hex'));
     buf = Buffer.concat([buf, chunk]);
     const { frames, rest } = extractFrames(buf);
     buf = rest;
     for (const inner of frames) {
       try {
         const frame = decode(inner);
+        frameCount++;
+        const id = '0x' + frame.msgId.toString(16).padStart(4, '0');
+        log.info(`<- ${peer} frame#${frameCount} ${id} phone=${frame.phone} serial=${frame.serial} bodyLen=${frame.body.length} v2019=${frame.versionFlag}`);
+        log.hex(`   body[${id}]`, frame.body);
         handlers.handle(socket, frame);
       } catch (e) {
+        log.warn(`parse_error ${peer}: ${e.message} hex=${inner.toString('hex')}`);
         store.messages.push({ ts: new Date().toISOString(), type: 'parse_error', error: e.message, hex: inner.toString('hex') });
       }
     }
   });
-  socket.on('close', () => console.log(`[JT808] close ${peer}`));
-  socket.on('error', (e) => console.log(`[JT808] err ${peer} ${e.message}`));
+  socket.on('close', (hadErr) => {
+    const dur = ((Date.now() - connectedAt) / 1000).toFixed(1);
+    log.info(`- close   ${peer} after=${dur}s frames=${frameCount} hadErr=${hadErr}`);
+  });
+  socket.on('error', (e) => log.warn(`socket_error ${peer}: ${e.message}`));
+  socket.on('end',   () => log.info(`  end-of-stream ${peer}`));
+  socket.on('timeout', () => log.warn(`  timeout ${peer}`));
 });
 
-jt808.listen(JT808_PORT, () => console.log(`[JT808] TCP listening on :${JT808_PORT}`));
+jt808.listen(JT808_PORT, () => log.info(`TCP listening on :${JT808_PORT}`));
+jt808.on('error', (e) => log.error(`server error: ${e.message}`));
 
 // ---------- Attachment TCP server ----------
 attachmentServer.start(ATTACHMENT_PORT);
 
-// ---------- FTP server (for 0x9206 file-upload-instruction) ----------
+// ---------- FTP server ----------
 const ftp = new FtpSrv({
   url: `ftp://0.0.0.0:${FTP_PORT}`,
   pasv_url: PUBLIC_IP,
@@ -59,27 +78,31 @@ const ftp = new FtpSrv({
   anonymous: true,
 });
 ftp.on('login', ({ connection, username }, resolve) => {
-  console.log(`[FTP] login user=${username}`);
+  flog.info(`login user=${username} ip=${connection.ip}`);
   connection.on('STOR', (error, fileName) => {
-    if (!error) {
+    if (error) { flog.warn(`STOR error ${fileName}: ${error.message}`); return; }
+    try {
       const stat = fs.statSync(fileName);
       const dest = path.join(MEDIA_DIR, path.basename(fileName));
-      try { fs.copyFileSync(fileName, dest); } catch {}
+      fs.copyFileSync(fileName, dest);
+      flog.info(`STOR ok ${path.basename(fileName)} size=${stat.size} -> ${dest}`);
       store.media.push({ ts: new Date().toISOString(), source: 'ftp', user: username, fname: path.basename(fileName), size: stat.size, path: dest });
-    }
+    } catch (e) { flog.warn(`STOR copy failed: ${e.message}`); }
   });
+  connection.on('RETR', (err, fname) => flog.info(`RETR ${fname}${err ? ' ERR ' + err.message : ''}`));
   resolve({ root: FTP_ROOT });
 });
-ftp.listen().then(() => console.log(`[FTP]   listening on :${FTP_PORT}, pasv ${PUBLIC_IP}:30000-30100`));
+ftp.listen().then(() => flog.info(`listening on :${FTP_PORT}, pasv ${PUBLIC_IP}:30000-30100`));
 
 // ---------- HTTP API ----------
 const app = express();
 app.use(express.json());
+app.use((req, _res, next) => { hlog.info(`${req.method} ${req.url} from ${req.ip}`); next(); });
 
 app.get('/', (_, res) => res.json({
   ok: true,
   ports: { http: HTTP_PORT, jt808: JT808_PORT, attachment: ATTACHMENT_PORT, ftp: FTP_PORT },
-  endpoints: ['/messages', '/alerts', '/media', '/media/:filename', '/terminals'],
+  endpoints: ['/messages', '/alerts', '/media', '/media/:filename', '/terminals', '/logs'],
 }));
 
 app.get('/messages', (req, res) => {
@@ -110,11 +133,26 @@ app.get('/terminals', (_, res) => {
   res.json([...store.terminals.values()].map(({ socket, ...rest }) => rest));
 });
 
+// Convenience: dump everything we know about a phone in one shot — handy for sharing.
+app.get('/debug/:phone', (req, res) => {
+  const p = req.params.phone;
+  res.json({
+    terminal: store.terminals.get(p),
+    messages: store.messages.list().filter(m => m.phone === p).slice(0, 50),
+    alerts:   store.alerts.list().filter(m => m.phone === p).slice(0, 50),
+    media:    store.media.list().filter(m => m.phone === p).slice(0, 50),
+  });
+});
+
 app.listen(HTTP_PORT, () => {
-  console.log(`[HTTP]  listening on :${HTTP_PORT}`);
-  console.log(`---`);
+  hlog.info(`listening on :${HTTP_PORT}`);
+  console.log('---');
   console.log(`Public IP: ${PUBLIC_IP}`);
   console.log(`Configure device: server IP=${PUBLIC_IP}, JT808 TCP port=${JT808_PORT}`);
   console.log(`Attachment server (auto-advertised via 0x9208): ${PUBLIC_IP}:${ATTACHMENT_PORT}`);
   console.log(`FTP: ${PUBLIC_IP}:${FTP_PORT} (anonymous, files copied to ./media)`);
+  console.log(`Log level: ${process.env.LOG_LEVEL || 'debug'} — set LOG_LEVEL=info to quiet hex dumps`);
 });
+
+process.on('uncaughtException',  (e) => log.error(`uncaughtException: ${e.stack || e}`));
+process.on('unhandledRejection', (e) => log.error(`unhandledRejection: ${e && e.stack || e}`));

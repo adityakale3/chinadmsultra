@@ -1,6 +1,8 @@
 const { encode } = require('./codec');
 const { parseLocation, parseBulkLocation } = require('./parse-location');
 const store = require('../store');
+const { make } = require('../logger');
+const log = make('JT808');
 
 const ATTACHMENT_HOST = process.env.ATTACHMENT_HOST || '13.206.186.1';
 const ATTACHMENT_TCP_PORT = Number(process.env.ATTACHMENT_TCP_PORT || 7612);
@@ -48,6 +50,11 @@ function record(kind, entry) {
   if (kind === 'alert') store.alerts.push({ ts: new Date().toISOString(), ...entry });
 }
 
+function send(socket, label, buf) {
+  socket.write(buf);
+  log.debug(`-> ${label}`, buf.toString('hex'));
+}
+
 function handle(socket, frame) {
   const { msgId, phone, serial, body, versionFlag, raw } = frame;
   const v = versionFlag;
@@ -65,23 +72,27 @@ function handle(socket, frame) {
       const authCode = 'AUTH' + Date.now().toString(36);
       term.authCode = authCode;
       term.registered = true;
-      socket.write(buildRegisterResponse(phone, serial, 0, authCode, v));
+      send(socket, `0x8100 register-ack phone=${phone}`, buildRegisterResponse(phone, serial, 0, authCode, v));
+      log.info(`REGISTER phone=${phone} -> authCode=${authCode}`);
       record('msg', { ...base, type: 'register', parsed: { authCode } });
       return;
     }
     case 0x0102: { // auth
-      socket.write(buildGeneralResponse(phone, serial, msgId, 0, v));
+      send(socket, `0x8001 auth-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
+      log.info(`AUTH phone=${phone} body="${body.toString('utf8').replace(/\0/g,'').replace(/[^\x20-\x7e]/g,'.')}"`);
       record('msg', { ...base, type: 'auth', parsed: { authBody: body.toString('utf8') } });
       return;
     }
     case 0x0002: { // heartbeat
-      socket.write(buildGeneralResponse(phone, serial, msgId, 0, v));
+      send(socket, `0x8001 heartbeat-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
+      log.info(`HEARTBEAT phone=${phone}`);
       record('msg', { ...base, type: 'heartbeat' });
       return;
     }
     case 0x0200: { // location
       const parsed = parseLocation(body);
-      socket.write(buildGeneralResponse(phone, serial, msgId, 0, v));
+      send(socket, `0x8001 0x0200-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
+      log.info(`LOCATION phone=${phone} lat=${parsed.lat} lon=${parsed.lon} spd=${parsed.speed_kmh} dir=${parsed.direction} t=${parsed.time} alarms=${(parsed.alarms||[]).join(',') || 'none'}`);
 
       const adasDsmBsd = (parsed.extras || []).filter(x => x.kind);
       const hasAlarm = (parsed.alarms && parsed.alarms.length) || adasDsmBsd.length;
@@ -97,7 +108,8 @@ function handle(socket, frame) {
         if (!alarmIdBuf) continue;
         const alarmNumber32 = Buffer.alloc(32);
         Buffer.from(`${phone}-${Date.now()}`).copy(alarmNumber32);
-        socket.write(build9208(phone, alarmIdBuf, alarmNumber32, v));
+        send(socket, `0x9208 attach-req phone=${phone} kind=${ev.kind} ev=${ev.eventName}`, build9208(phone, alarmIdBuf, alarmNumber32, v));
+        log.info(`ALARM ${ev.kind} ${ev.eventName} phone=${phone} -> requested attachment upload`);
         record('alert', {
           phone, type: 'attachment_request', alarmKind: ev.kind,
           eventName: ev.eventName, alarmIdentification: ev.alarmIdentification,
@@ -106,8 +118,9 @@ function handle(socket, frame) {
       return;
     }
     case 0x0704: { // bulk locations
-      socket.write(buildGeneralResponse(phone, serial, msgId, 0, v));
+      send(socket, `0x8001 0x0704-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
       const parsed = parseBulkLocation(body);
+      log.info(`BULK_LOC phone=${phone} count=${parsed.count} firstLat=${parsed.items?.[0]?.lat} firstLon=${parsed.items?.[0]?.lon} t=${parsed.items?.[0]?.time}`);
       const anyAlarm = (parsed.items || []).some(it => (it.alarms && it.alarms.length) || (it.extras || []).some(x => x.kind));
       record(anyAlarm ? 'alert' : 'msg', { ...base, type: 'bulk_location', parsed });
       // If any inner item carries an ADAS/DSM/BSD extra, request the video evidence.
@@ -122,7 +135,8 @@ function handle(socket, frame) {
           Buffer.from(ev.alarmIdentification.termId.padEnd(7, '\0')).copy(alarmIdBuf, 0, 0, 7);
           const alarmNumber32 = Buffer.alloc(32);
           Buffer.from(`${phone}-${Date.now()}`).copy(alarmNumber32);
-          socket.write(build9208(phone, alarmIdBuf, alarmNumber32, v));
+          send(socket, `0x9208 attach-req phone=${phone} kind=${ev.kind} ev=${ev.eventName}`, build9208(phone, alarmIdBuf, alarmNumber32, v));
+          log.info(`ALARM ${ev.kind} ${ev.eventName} phone=${phone} (in bulk) -> requested attachment upload`);
           record('alert', {
             phone, type: 'attachment_request', alarmKind: ev.kind,
             eventName: ev.eventName, alarmIdentification: ev.alarmIdentification,
@@ -132,18 +146,21 @@ function handle(socket, frame) {
       return;
     }
     case 0x0900: { // ULV transparent data uplink
-      socket.write(buildGeneralResponse(phone, serial, msgId, 0, v));
+      send(socket, `0x8001 0x0900-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
       const subType = body[0];
+      log.info(`TRANSPARENT phone=${phone} sub=0x${subType.toString(16)} hex=${body.toString('hex')}`);
       record('msg', { ...base, type: 'transparent', parsed: { subType: '0x' + subType.toString(16), hex: body.toString('hex') } });
       return;
     }
     case 0x0801: case 0x0800: case 0x0805: { // legacy multimedia
-      socket.write(buildGeneralResponse(phone, serial, msgId, 0, v));
+      send(socket, `0x8001 multimedia-ack phone=${phone} ${idHex}`, buildGeneralResponse(phone, serial, msgId, 0, v));
+      log.info(`MULTIMEDIA phone=${phone} ${idHex} bodyLen=${body.length}`);
       record('alert', { ...base, type: 'multimedia', parsed: { hex: body.toString('hex') } });
       return;
     }
     default: {
-      socket.write(buildGeneralResponse(phone, serial, msgId, 0, v));
+      send(socket, `0x8001 default-ack ${idHex} phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
+      log.warn(`UNHANDLED ${idHex} phone=${phone} bodyHex=${body.toString('hex')}`);
       record('msg', { ...base, type: 'unknown', parsed: { hex: body.toString('hex') } });
     }
   }
