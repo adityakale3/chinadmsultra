@@ -182,80 +182,112 @@ const ALARM_TYPE_NAME = {
   '6601':'rear_approach', '6602':'left_approach', '6603':'right_approach',
 };
 
-function buildEvents() {
-  const alerts = store.alerts.list().filter(a => a.type === 'attachment_request');
-  const media = store.media.list();
-
-  // Index media by alarmNumber, AND by the timestamp suffix in filenames so we can
-  // group historical files (saved before alarmNumber was tracked) too.
-  const tsKey = fname => {
-    const m = fname && fname.match(/-(\d+)\.[^.]+$/);
-    return m ? m[1] : null;
+// Parse the ULV alarm filename: <type>_<channel>_<alarmType>_<seq>_<alarmNumber>.<ext>
+// alarmNumber = "<phone>-<timestampMs>" — the same string we sent in 0x9208.
+function parseAlarmFilename(fname) {
+  const m = fname.match(/^(\d+)_(\d+)_([0-9a-fA-F]+)_(\d+)_(.+?)\.([^.]+)$/);
+  if (!m) return null;
+  const [, fileType, channel, alarmType, seq, alarmNumber, ext] = m;
+  const phoneMs = alarmNumber.match(/^(\d+)-(\d+)$/);
+  return {
+    fileType: parseInt(fileType, 10),
+    channel: parseInt(channel, 10),
+    alarmType,
+    seq: parseInt(seq, 10),
+    alarmNumber,
+    phone: phoneMs ? phoneMs[1] : null,
+    ts: phoneMs ? new Date(Number(phoneMs[2])).toISOString() : null,
+    ext,
   };
-  const mediaByAlarm = new Map();
-  const mediaByTs = new Map();
-  for (const m of media) {
-    if (m.alarmNumber) {
-      if (!mediaByAlarm.has(m.alarmNumber)) mediaByAlarm.set(m.alarmNumber, []);
-      mediaByAlarm.get(m.alarmNumber).push(m);
+}
+
+function buildEvents() {
+  const events = new Map(); // alarmNumber -> event
+
+  // Pass 1 — disk scan: every file in MEDIA_DIR is its own source of truth.
+  // Survives process restarts since files persist while in-memory rings don't.
+  let diskFiles = [];
+  try { diskFiles = fs.readdirSync(MEDIA_DIR); } catch {}
+
+  for (const fname of diskFiles) {
+    let st;
+    try { st = fs.statSync(path.join(MEDIA_DIR, fname)); } catch { continue; }
+    const parsed = parseAlarmFilename(fname);
+    if (!parsed) {
+      // FTP-uploaded files don't follow the alarm-filename schema; group by phone+date.
+      const ftpMatch = fname.match(/^(\d+)_(.+)$/);
+      if (!ftpMatch) continue;
+      const phone = ftpMatch[1];
+      const key = `ftp-${phone}-${fname}`;
+      if (!events.has(key)) {
+        events.set(key, {
+          alarmNumber: key, ts: st.mtime.toISOString(), phone,
+          kind: 'FTP', eventName: 'video_upload', alarmType: undefined,
+          deviceTime: undefined, lat: undefined, lon: undefined,
+          speed_kmh: undefined, direction: undefined, files: [],
+        });
+      }
+      events.get(key).files.push({
+        fname, fileType: undefined, size: st.size,
+        url: `/media/${encodeURIComponent(fname)}`,
+      });
+      continue;
     }
-    const ts = tsKey(m.fname);
-    if (ts) {
-      if (!mediaByTs.has(ts)) mediaByTs.set(ts, []);
-      mediaByTs.get(ts).push(m);
+    const key = parsed.alarmNumber;
+    if (!events.has(key)) {
+      const at = parsed.alarmType.toLowerCase();
+      events.set(key, {
+        alarmNumber: key,
+        ts: parsed.ts || st.mtime.toISOString(),
+        phone: parsed.phone,
+        kind: at.startsWith('64') ? 'ADAS' : at.startsWith('65') ? 'DSM' : at.startsWith('66') ? 'BSD' : undefined,
+        eventName: ALARM_TYPE_NAME[at],
+        alarmType: '0x' + parsed.alarmType,
+        deviceTime: undefined,
+        lat: undefined, lon: undefined, speed_kmh: undefined, direction: undefined,
+        files: [],
+      });
     }
+    events.get(key).files.push({
+      fname,
+      fileType: parsed.fileType,
+      size: st.size,
+      url: `/media/${encodeURIComponent(fname)}`,
+    });
   }
 
-  // Start from alerts that have an alarmNumber (preferred — has lat/lon/event name).
-  const out = [];
-  const claimedAlarmNumbers = new Set();
+  // Pass 2 — overlay alert metadata (lat/lon/deviceTime/eventName) for any alarmNumbers
+  // we've seen this session. This adds GPS context to disk-only events.
+  const alerts = store.alerts.list().filter(a => a.type === 'attachment_request' && a.alarmNumber);
   for (const a of alerts) {
-    if (!a.alarmNumber) continue;
-    const files = mediaByAlarm.get(a.alarmNumber) || [];
-    const alarmType = files[0]?.alarmType;
-    out.push({
-      alarmNumber: a.alarmNumber,
-      ts: a.ts,
-      phone: a.phone,
-      kind: a.alarmKind,
-      eventName: (alarmType && ALARM_TYPE_NAME[alarmType.toLowerCase()]) || a.eventName,
-      alarmType: alarmType ? '0x' + alarmType : undefined,
-      deviceTime: a.location?.time,
-      lat: a.location?.lat, lon: a.location?.lon,
-      speed_kmh: a.location?.speed_kmh, direction: a.location?.direction,
-      files: files.map(f => ({ fname: f.fname, fileType: f.fileType, size: f.bytes, url: `/media/${encodeURIComponent(path.basename(f.path))}` })),
-    });
-    claimedAlarmNumbers.add(a.alarmNumber);
+    let e = events.get(a.alarmNumber);
+    if (!e) {
+      e = {
+        alarmNumber: a.alarmNumber, ts: a.ts, phone: a.phone,
+        kind: a.alarmKind, eventName: a.eventName, alarmType: undefined,
+        deviceTime: undefined, lat: undefined, lon: undefined,
+        speed_kmh: undefined, direction: undefined, files: [],
+      };
+      events.set(a.alarmNumber, e);
+    }
+    if (a.location) {
+      e.lat = a.location.lat; e.lon = a.location.lon;
+      e.deviceTime = a.location.time;
+      e.speed_kmh = a.location.speed_kmh;
+      e.direction = a.location.direction;
+    }
+    if (!e.kind) e.kind = a.alarmKind;
+    if (!e.eventName && a.eventName) e.eventName = a.eventName;
+    if (a.ts && (!e.ts || new Date(a.ts) < new Date(e.ts))) e.ts = a.ts;
   }
 
-  // Then add any media-only events (no alert record — older alarms before alarmNumber tracking).
-  for (const [ts, files] of mediaByTs) {
-    const sample = files[0];
-    if (sample.alarmNumber && claimedAlarmNumbers.has(sample.alarmNumber)) continue;
-    const alarmType = files[0]?.alarmType;
-    out.push({
-      alarmNumber: sample.alarmNumber || `unknown-${ts}`,
-      ts: sample.ts,
-      phone: sample.phone,
-      kind: alarmType?.startsWith('64') ? 'ADAS' : alarmType?.startsWith('65') ? 'DSM' : alarmType?.startsWith('66') ? 'BSD' : undefined,
-      eventName: alarmType && ALARM_TYPE_NAME[alarmType.toLowerCase()],
-      alarmType: alarmType ? '0x' + alarmType : undefined,
-      deviceTime: undefined,
-      lat: undefined, lon: undefined, speed_kmh: undefined, direction: undefined,
-      files: files.map(f => ({ fname: f.fname, fileType: f.fileType, size: f.bytes, url: `/media/${encodeURIComponent(path.basename(f.path))}` })),
-    });
+  // Sort files within each event so video appears first, then image, then metadata.
+  const order = { 2: 0, 0: 1, 1: 2, 3: 3 };
+  for (const e of events.values()) {
+    e.files.sort((a, b) => (order[a.fileType] ?? 9) - (order[b.fileType] ?? 9));
   }
 
-  // Dedupe by alarmNumber (alerts can have multiple completion records).
-  const seen = new Set();
-  const unique = [];
-  for (const e of out) {
-    if (seen.has(e.alarmNumber)) continue;
-    seen.add(e.alarmNumber);
-    unique.push(e);
-  }
-  unique.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
-  return unique;
+  return [...events.values()].sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
 }
 
 app.get('/events', (_, res) => res.json(buildEvents()));
