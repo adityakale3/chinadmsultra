@@ -24,6 +24,8 @@ if (!fs.existsSync(FTP_ROOT))  fs.mkdirSync(FTP_ROOT,  { recursive: true });
 const jt808 = net.createServer((socket) => {
   const peer = `${socket.remoteAddress}:${socket.remotePort}`;
   console.log(`[JT808] connect ${peer}`);
+  socket.setKeepAlive(true, 30000);
+  socket.setNoDelay(true);
   let buf = Buffer.alloc(0);
 
   socket.on('data', (chunk) => {
