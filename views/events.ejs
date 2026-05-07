@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DMS Alarm Events</title>
+  <style>
+    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; margin: 0; padding: 20px; background: #0e1116; color: #e7eaf0; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    .meta { color: #8a93a3; font-size: 12px; margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; background: #161a22; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #232a36; vertical-align: top; font-size: 13px; }
+    th { background: #1d232e; color: #b9c1d0; font-weight: 600; position: sticky; top: 0; }
+    tr:hover { background: #1a212c; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+    .pill.DSM { background: #fef3c7; color: #92400e; }
+    .pill.ADAS { background: #dbeafe; color: #1e3a8a; }
+    .pill.BSD { background: #d1fae5; color: #065f46; }
+    .mono { font-family: ui-monospace, SF Mono, Menlo, Consolas, monospace; font-size: 12px; color: #9aa3b3; }
+    .files a { color: #79b8ff; text-decoration: none; margin-right: 8px; }
+    .files a:hover { text-decoration: underline; }
+    .latlon a { color: #79b8ff; text-decoration: none; }
+    .empty { text-align: center; padding: 40px; color: #8a93a3; }
+    dialog { background: #161a22; color: #e7eaf0; border: 1px solid #2a3140; border-radius: 8px; padding: 0; max-width: 90vw; max-height: 90vh; }
+    dialog::backdrop { background: rgba(0,0,0,0.7); }
+    dialog header { padding: 12px 16px; border-bottom: 1px solid #232a36; display: flex; justify-content: space-between; align-items: center; }
+    dialog header button { background: #2a3140; color: #e7eaf0; border: 0; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+    dialog .body { padding: 16px; }
+    dialog video, dialog img { max-width: 100%; max-height: 70vh; display: block; }
+    .controls { margin-bottom: 12px; }
+    .controls input { background: #1d232e; color: #e7eaf0; border: 1px solid #2a3140; padding: 6px 10px; border-radius: 4px; font-size: 13px; width: 220px; }
+  </style>
+</head>
+<body>
+  <h1>DMS Alarm Events</h1>
+  <div class="meta"><%= events.length %> events &middot; auto-refresh every 10s &middot; <a href="/events" style="color:#79b8ff">/events JSON</a></div>
+
+  <div class="controls">
+    <input id="filter" placeholder="filter (event, phone, type)" oninput="applyFilter()" />
+  </div>
+
+  <% if (events.length === 0) { %>
+    <div class="empty">No alarm events yet. Trigger a DMS event in front of the camera (close eyes 5+ s, look away, smoking/phone gesture).</div>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>When (server)</th>
+          <th>Device time</th>
+          <th>Phone</th>
+          <th>Event</th>
+          <th>Type</th>
+          <th>Lat / Lon</th>
+          <th>Speed</th>
+          <th>Files</th>
+        </tr>
+      </thead>
+      <tbody id="rows">
+        <% events.forEach(e => { %>
+          <tr data-search="<%= [e.phone, e.kind, e.eventName, e.alarmType, e.alarmNumber].filter(Boolean).join(' ').toLowerCase() %>">
+            <td class="mono"><%= e.ts ? new Date(e.ts).toLocaleString() : '' %></td>
+            <td class="mono"><%= e.deviceTime || '—' %></td>
+            <td class="mono"><%= e.phone || '—' %></td>
+            <td><%= e.eventName || '—' %></td>
+            <td>
+              <% if (e.kind) { %><span class="pill <%= e.kind %>"><%= e.kind %></span><% } %>
+              <% if (e.alarmType) { %> <span class="mono"><%= e.alarmType %></span><% } %>
+            </td>
+            <td class="latlon">
+              <% if (e.lat != null && e.lon != null) { %>
+                <a href="https://www.google.com/maps?q=<%= e.lat %>,<%= e.lon %>" target="_blank">
+                  <%= e.lat.toFixed(6) %>, <%= e.lon.toFixed(6) %>
+                </a>
+              <% } else { %>—<% } %>
+            </td>
+            <td class="mono"><%= e.speed_kmh != null ? e.speed_kmh + ' km/h' : '—' %></td>
+            <td class="files">
+              <% (e.files || []).forEach(f => {
+                   const ext = (f.fname.split('.').pop() || '').toLowerCase();
+                   const kind = (ext === 'mp4' || ext === 'h264' || ext === 'h265' || ext === '265') ? 'video'
+                              : (ext === 'jpg' || ext === 'jpeg' || ext === 'png') ? 'image' : 'file';
+                   const sizeKB = (f.size / 1024).toFixed(0);
+              %>
+                <a href="#" onclick="open<%= kind === 'video' ? 'Video' : kind === 'image' ? 'Image' : 'File' %>('<%= f.url %>','<%= f.fname %>'); return false;">
+                  <% if (kind === 'video') { %>▶<% } else if (kind === 'image') { %>📷<% } else { %>📄<% } %>
+                  <%= ext %> (<%= sizeKB %>KB)
+                </a>
+              <% }) %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+
+  <dialog id="viewer">
+    <header>
+      <span id="viewer-title" class="mono"></span>
+      <button onclick="document.getElementById('viewer').close()">Close</button>
+    </header>
+    <div class="body" id="viewer-body"></div>
+  </dialog>
+
+  <script>
+    function openVideo(url, name) {
+      document.getElementById('viewer-title').textContent = name;
+      document.getElementById('viewer-body').innerHTML =
+        '<video controls autoplay src="' + url + '"></video>' +
+        '<div style="margin-top:8px"><a href="' + url + '" download style="color:#79b8ff">Download</a></div>';
+      document.getElementById('viewer').showModal();
+    }
+    function openImage(url, name) {
+      document.getElementById('viewer-title').textContent = name;
+      document.getElementById('viewer-body').innerHTML =
+        '<img src="' + url + '" />' +
+        '<div style="margin-top:8px"><a href="' + url + '" download style="color:#79b8ff">Download</a></div>';
+      document.getElementById('viewer').showModal();
+    }
+    function openFile(url, name) {
+      window.open(url, '_blank');
+    }
+    function applyFilter() {
+      const q = document.getElementById('filter').value.toLowerCase().trim();
+      document.querySelectorAll('#rows tr').forEach(tr => {
+        const hay = tr.dataset.search || '';
+        tr.style.display = !q || hay.indexOf(q) >= 0 ? '' : 'none';
+      });
+    }
+    setTimeout(() => location.reload(), 10000);
+  </script>
+</body>
+</html>

@@ -131,13 +131,15 @@ ftp.listen().then(() => flog.info(`listening on :${FTP_PORT}, pasv ${PUBLIC_IP}:
 
 // ---------- HTTP API ----------
 const app = express();
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
 app.use(express.json());
 app.use((req, _res, next) => { hlog.info(`${req.method} ${req.url} from ${req.ip}`); next(); });
 
 app.get('/', (_, res) => res.json({
   ok: true,
   ports: { http: HTTP_PORT, jt808: JT808_PORT, attachment: ATTACHMENT_PORT, ftp: FTP_PORT },
-  endpoints: ['/messages', '/alerts', '/media', '/media/:filename', '/terminals', '/logs'],
+  endpoints: ['/dashboard', '/events', '/messages', '/alerts', '/media', '/media/:filename', '/terminals'],
 }));
 
 app.get('/messages', (req, res) => {
@@ -166,6 +168,100 @@ app.get('/media/:filename', (req, res) => {
 
 app.get('/terminals', (_, res) => {
   res.json([...store.terminals.values()].map(safeTerminal));
+});
+
+// /events — group alarms with their evidence files into one event per alarm.
+// Joins on alarmNumber (the "<phone>-<timestamp>" tag we put in 0x9208).
+const ALARM_TYPE_NAME = {
+  // high byte = channel, low byte = sub-event
+  '6401':'forward_collision', '6402':'lane_deviation', '6403':'close_distance',
+  '6404':'pedestrian_collision', '6405':'frequent_lane_change', '6406':'road_sign_overrun',
+  '6407':'obstacle', '6408':'driving_assist_state',
+  '6501':'fatigue', '6502':'phone_call', '6503':'smoking', '6504':'distracted',
+  '6505':'driver_abnormal', '6506':'no_seatbelt',
+  '6601':'rear_approach', '6602':'left_approach', '6603':'right_approach',
+};
+
+function buildEvents() {
+  const alerts = store.alerts.list().filter(a => a.type === 'attachment_request');
+  const media = store.media.list();
+
+  // Index media by alarmNumber, AND by the timestamp suffix in filenames so we can
+  // group historical files (saved before alarmNumber was tracked) too.
+  const tsKey = fname => {
+    const m = fname && fname.match(/-(\d+)\.[^.]+$/);
+    return m ? m[1] : null;
+  };
+  const mediaByAlarm = new Map();
+  const mediaByTs = new Map();
+  for (const m of media) {
+    if (m.alarmNumber) {
+      if (!mediaByAlarm.has(m.alarmNumber)) mediaByAlarm.set(m.alarmNumber, []);
+      mediaByAlarm.get(m.alarmNumber).push(m);
+    }
+    const ts = tsKey(m.fname);
+    if (ts) {
+      if (!mediaByTs.has(ts)) mediaByTs.set(ts, []);
+      mediaByTs.get(ts).push(m);
+    }
+  }
+
+  // Start from alerts that have an alarmNumber (preferred — has lat/lon/event name).
+  const out = [];
+  const claimedAlarmNumbers = new Set();
+  for (const a of alerts) {
+    if (!a.alarmNumber) continue;
+    const files = mediaByAlarm.get(a.alarmNumber) || [];
+    const alarmType = files[0]?.alarmType;
+    out.push({
+      alarmNumber: a.alarmNumber,
+      ts: a.ts,
+      phone: a.phone,
+      kind: a.alarmKind,
+      eventName: (alarmType && ALARM_TYPE_NAME[alarmType.toLowerCase()]) || a.eventName,
+      alarmType: alarmType ? '0x' + alarmType : undefined,
+      deviceTime: a.location?.time,
+      lat: a.location?.lat, lon: a.location?.lon,
+      speed_kmh: a.location?.speed_kmh, direction: a.location?.direction,
+      files: files.map(f => ({ fname: f.fname, fileType: f.fileType, size: f.bytes, url: `/media/${encodeURIComponent(path.basename(f.path))}` })),
+    });
+    claimedAlarmNumbers.add(a.alarmNumber);
+  }
+
+  // Then add any media-only events (no alert record — older alarms before alarmNumber tracking).
+  for (const [ts, files] of mediaByTs) {
+    const sample = files[0];
+    if (sample.alarmNumber && claimedAlarmNumbers.has(sample.alarmNumber)) continue;
+    const alarmType = files[0]?.alarmType;
+    out.push({
+      alarmNumber: sample.alarmNumber || `unknown-${ts}`,
+      ts: sample.ts,
+      phone: sample.phone,
+      kind: alarmType?.startsWith('64') ? 'ADAS' : alarmType?.startsWith('65') ? 'DSM' : alarmType?.startsWith('66') ? 'BSD' : undefined,
+      eventName: alarmType && ALARM_TYPE_NAME[alarmType.toLowerCase()],
+      alarmType: alarmType ? '0x' + alarmType : undefined,
+      deviceTime: undefined,
+      lat: undefined, lon: undefined, speed_kmh: undefined, direction: undefined,
+      files: files.map(f => ({ fname: f.fname, fileType: f.fileType, size: f.bytes, url: `/media/${encodeURIComponent(path.basename(f.path))}` })),
+    });
+  }
+
+  // Dedupe by alarmNumber (alerts can have multiple completion records).
+  const seen = new Set();
+  const unique = [];
+  for (const e of out) {
+    if (seen.has(e.alarmNumber)) continue;
+    seen.add(e.alarmNumber);
+    unique.push(e);
+  }
+  unique.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+  return unique;
+}
+
+app.get('/events', (_, res) => res.json(buildEvents()));
+
+app.get('/dashboard', (_, res) => {
+  res.render('events', { events: buildEvents() });
 });
 
 function safeTerminal(t) {

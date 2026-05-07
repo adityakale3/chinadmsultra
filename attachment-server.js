@@ -167,8 +167,13 @@ function handleSignaling(socket, frame, openFiles, version2019) {
       socket.write(genericResponse(phone, serial, msgId, version2019));
       socket.write(file9212(phone, fname, fileType, version2019));
       const wrote = f ? f.written : 0;
-      log.info(`1212 phone=${phone} done "${fname}" wroteBytes=${wrote} -> ${safe}`);
-      store.media.push({ ts: new Date().toISOString(), source: 'alarm_attachment', phone, fname, fileType, path: safe, bytes: wrote });
+      // Filename format: <type>_<channel>_<alarmType>_<seq>_<alarmNumber>.<ext>
+      // alarmNumber = "<phone>-<timestampMs>" matching the alarm we sent via 0x9208.
+      const m = fname.match(/^(\d+)_(\d+)_([0-9a-fA-F]+)_(\d+)_(.+?)\.([^.]+)$/);
+      const alarmNumber = m ? m[5] : null;
+      const alarmType = m ? m[3] : null;
+      log.info(`1212 phone=${phone} done "${fname}" alarmNumber=${alarmNumber} wroteBytes=${wrote} -> ${safe}`);
+      store.media.push({ ts: new Date().toISOString(), source: 'alarm_attachment', phone, fname, fileType, alarmNumber, alarmType, path: safe, bytes: wrote });
       return;
     }
     default:

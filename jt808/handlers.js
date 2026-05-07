@@ -140,18 +140,18 @@ function handle(socket, frame) {
       // For each ADAS/DSM/BSD alarm, request the attachment upload
       for (const ev of adasDsmBsd) {
         if (!ev.alarmIdentification) continue;
-        // Build 16B alarm-id buffer = the original last-16 bytes from the additional item
-        // We don't have it directly; reconstruct from termId(7) + bcd time would be lossy.
-        // Pull it directly from body: search for the extra by id.
         const alarmIdBuf = extractAlarmIdBytes(body, ev.id);
         if (!alarmIdBuf) continue;
+        const alarmNumberStr = `${phone}-${Date.now()}`;
         const alarmNumber32 = Buffer.alloc(32);
-        Buffer.from(`${phone}-${Date.now()}`).copy(alarmNumber32);
+        Buffer.from(alarmNumberStr).copy(alarmNumber32);
         send(socket, `0x9208 attach-req phone=${phone} kind=${ev.kind} ev=${ev.eventName}`, build9208(phone, alarmIdBuf, alarmNumber32, v));
-        log.info(`ALARM ${ev.kind} ${ev.eventName} phone=${phone} -> requested attachment upload`);
+        log.info(`ALARM ${ev.kind} ${ev.eventName} phone=${phone} alarmNumber=${alarmNumberStr} -> requested attachment upload`);
         record('alert', {
-          phone, type: 'attachment_request', alarmKind: ev.kind,
-          eventName: ev.eventName, alarmIdentification: ev.alarmIdentification,
+          phone, type: 'attachment_request', alarmKind: ev.kind, eventName: ev.eventName,
+          alarmNumber: alarmNumberStr,
+          alarmIdentification: ev.alarmIdentification,
+          location: { lat: parsed.lat, lon: parsed.lon, time: parsed.time, speed_kmh: parsed.speed_kmh, direction: parsed.direction },
         });
       }
       return;
@@ -174,11 +174,15 @@ function handle(socket, frame) {
           Buffer.from(ev.alarmIdentification.termId.padEnd(7, '\0')).copy(alarmIdBuf, 0, 0, 7);
           const alarmNumber32 = Buffer.alloc(32);
           Buffer.from(`${phone}-${Date.now()}`).copy(alarmNumber32);
+          const alarmNumberStr = `${phone}-${Date.now()}`;
+          Buffer.from(alarmNumberStr).copy(alarmNumber32);
           send(socket, `0x9208 attach-req phone=${phone} kind=${ev.kind} ev=${ev.eventName}`, build9208(phone, alarmIdBuf, alarmNumber32, v));
-          log.info(`ALARM ${ev.kind} ${ev.eventName} phone=${phone} (in bulk) -> requested attachment upload`);
+          log.info(`ALARM ${ev.kind} ${ev.eventName} phone=${phone} alarmNumber=${alarmNumberStr} (in bulk) -> requested attachment upload`);
           record('alert', {
-            phone, type: 'attachment_request', alarmKind: ev.kind,
-            eventName: ev.eventName, alarmIdentification: ev.alarmIdentification,
+            phone, type: 'attachment_request', alarmKind: ev.kind, eventName: ev.eventName,
+            alarmNumber: alarmNumberStr,
+            alarmIdentification: ev.alarmIdentification,
+            location: { lat: it.lat, lon: it.lon, time: it.time, speed_kmh: it.speed_kmh, direction: it.direction },
           });
         }
       }
