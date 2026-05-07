@@ -130,14 +130,20 @@ app.get('/media/:filename', (req, res) => {
 });
 
 app.get('/terminals', (_, res) => {
-  res.json([...store.terminals.values()].map(({ socket, ...rest }) => rest));
+  res.json([...store.terminals.values()].map(safeTerminal));
 });
 
-// Convenience: dump everything we know about a phone in one shot — handy for sharing.
+function safeTerminal(t) {
+  if (!t) return null;
+  const peer = t.socket && t.socket.remoteAddress
+    ? `${t.socket.remoteAddress}:${t.socket.remotePort}` : null;
+  return { phone: t.phone, lastSeen: t.lastSeen, authCode: t.authCode, registered: t.registered, peer };
+}
+
 app.get('/debug/:phone', (req, res) => {
   const p = req.params.phone;
   res.json({
-    terminal: store.terminals.get(p),
+    terminal: safeTerminal(store.terminals.get(p)),
     messages: store.messages.list().filter(m => m.phone === p).slice(0, 50),
     alerts:   store.alerts.list().filter(m => m.phone === p).slice(0, 50),
     media:    store.media.list().filter(m => m.phone === p).slice(0, 50),
