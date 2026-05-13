@@ -15,6 +15,8 @@
     .pill.DSM { background: #fef3c7; color: #92400e; }
     .pill.ADAS { background: #dbeafe; color: #1e3a8a; }
     .pill.BSD { background: #d1fae5; color: #065f46; }
+    .pill.ALCOHOL { background: #fecaca; color: #7f1d1d; }
+    .pill.FTP { background: #e9d5ff; color: #4c1d95; }
     .mono { font-family: ui-monospace, SF Mono, Menlo, Consolas, monospace; font-size: 12px; color: #9aa3b3; }
     .files a { color: #79b8ff; text-decoration: none; margin-right: 8px; }
     .files a:hover { text-decoration: underline; }
@@ -35,7 +37,7 @@
   <div class="meta"><%= events.length %> events &middot; auto-refresh every 10s &middot; <a href="/events" style="color:#79b8ff">/events JSON</a></div>
 
   <div class="controls">
-    <input id="filter" placeholder="filter (event, phone, type)" oninput="applyFilter()" />
+    <input id="filter" placeholder="filter (title, event, phone, type)" oninput="applyFilter()" />
   </div>
 
   <% if (events.length === 0) { %>
@@ -46,6 +48,7 @@
         <tr>
           <th>When (server)</th>
           <th>Device time</th>
+          <th>Title</th>
           <th>Phone</th>
           <th>Event</th>
           <th>Type</th>
@@ -56,11 +59,15 @@
       </thead>
       <tbody id="rows">
         <% events.forEach(e => { %>
-          <tr data-search="<%= [e.phone, e.kind, e.eventName, e.alarmType, e.alarmNumber].filter(Boolean).join(' ').toLowerCase() %>">
+          <tr data-search="<%= [e.title, e.phone, e.kind, e.eventName, e.alarmType, e.alarmNumber].filter(Boolean).join(' ').toLowerCase() %>">
             <td class="mono"><%= e.ts ? new Date(e.ts).toLocaleString() : '' %></td>
             <td class="mono"><%= e.deviceTime || '—' %></td>
+            <td><%= e.title || '—' %></td>
             <td class="mono"><%= e.phone || '—' %></td>
-            <td><%= e.eventName || '—' %></td>
+            <td>
+              <%= e.eventName || '—' %>
+              <% if (e.bac != null) { %><br><span class="mono">BAC <%= e.bac %></span><% } %>
+            </td>
             <td>
               <% if (e.kind) { %><span class="pill <%= e.kind %>"><%= e.kind %></span><% } %>
               <% if (e.alarmType) { %> <span class="mono"><%= e.alarmType %></span><% } %>

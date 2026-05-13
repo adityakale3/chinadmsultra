@@ -179,8 +179,18 @@ const ALARM_TYPE_NAME = {
   '6407':'obstacle', '6408':'driving_assist_state',
   '6501':'fatigue', '6502':'phone_call', '6503':'smoking', '6504':'distracted',
   '6505':'driver_abnormal', '6506':'no_seatbelt',
+  '6532':'alcohol',                       // vendor extension — Starkenn alcohol detector
   '6601':'rear_approach', '6602':'left_approach', '6603':'right_approach',
 };
+
+// Map of known device phones → human-readable title. Edit as fleet grows.
+const PHONE_TITLES = {
+  '806072880208': 'U-N5C',
+  '693071056712': 'U-N61',
+  '4133159891':   'Skywonder',
+  '77076779167':  'U-S61',
+};
+const titleFor = phone => PHONE_TITLES[phone] || '';
 
 // Parse the ULV alarm filename: <type>_<channel>_<alarmType>_<seq>_<alarmNumber>.<ext>
 // alarmNumber = "<phone>-<timestampMs>" — the same string we sent in 0x9208.
@@ -222,6 +232,7 @@ function buildEvents() {
       if (!events.has(key)) {
         events.set(key, {
           alarmNumber: key, ts: st.mtime.toISOString(), phone,
+          title: titleFor(phone),
           kind: 'FTP', eventName: 'video_upload', alarmType: undefined,
           deviceTime: undefined, lat: undefined, lon: undefined,
           speed_kmh: undefined, direction: undefined, files: [],
@@ -236,12 +247,20 @@ function buildEvents() {
     const key = parsed.alarmNumber;
     if (!events.has(key)) {
       const at = parsed.alarmType.toLowerCase();
+      const eventName = ALARM_TYPE_NAME[at];
+      // Vendor alcohol code (0x6532) lives in the DSM channel but is semantically
+      // an alcohol event — surface it as kind=ALCOHOL.
+      const kind = (eventName === 'alcohol' || at === '6532') ? 'ALCOHOL'
+                 : at.startsWith('64') ? 'ADAS'
+                 : at.startsWith('65') ? 'DSM'
+                 : at.startsWith('66') ? 'BSD' : undefined;
       events.set(key, {
         alarmNumber: key,
         ts: parsed.ts || st.mtime.toISOString(),
         phone: parsed.phone,
-        kind: at.startsWith('64') ? 'ADAS' : at.startsWith('65') ? 'DSM' : at.startsWith('66') ? 'BSD' : undefined,
-        eventName: ALARM_TYPE_NAME[at],
+        title: titleFor(parsed.phone),
+        kind,
+        eventName,
         alarmType: '0x' + parsed.alarmType,
         deviceTime: undefined,
         lat: undefined, lon: undefined, speed_kmh: undefined, direction: undefined,
@@ -264,12 +283,14 @@ function buildEvents() {
     if (!e) {
       e = {
         alarmNumber: a.alarmNumber, ts: a.ts, phone: a.phone,
+        title: titleFor(a.phone),
         kind: a.alarmKind, eventName: a.eventName, alarmType: undefined,
         deviceTime: undefined, lat: undefined, lon: undefined,
         speed_kmh: undefined, direction: undefined, files: [],
       };
       events.set(a.alarmNumber, e);
     }
+    if (!e.title) e.title = titleFor(a.phone);
     if (a.location) {
       e.lat = a.location.lat; e.lon = a.location.lon;
       e.deviceTime = a.location.time;
@@ -278,6 +299,7 @@ function buildEvents() {
     }
     if (!e.kind) e.kind = a.alarmKind;
     if (!e.eventName && a.eventName) e.eventName = a.eventName;
+    if (a.bac != null) e.bac = a.bac;
     if (a.ts && (!e.ts || new Date(a.ts) < new Date(e.ts))) e.ts = a.ts;
   }
 

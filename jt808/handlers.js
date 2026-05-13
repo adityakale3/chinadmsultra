@@ -1,5 +1,5 @@
 const { encode } = require('./codec');
-const { parseLocation, parseBulkLocation } = require('./parse-location');
+const { parseLocation, parseBulkLocation, alcoholFromAlarmFlag } = require('./parse-location');
 const store = require('../store');
 const { make } = require('../logger');
 const log = make('JT808');
@@ -79,6 +79,60 @@ function send(socket, label, buf) {
   log.debug(`-> ${label}`, buf.toString('hex'));
 }
 
+// --- Alcohol event helpers --------------------------------------------------
+// Emits a unified "ALCOHOL" alert no matter which channel surfaced it:
+//   (a) alarmFlag bits 15 / 28 in 0x0200/0x0704
+//   (b) 0x0900 transparent subtypes ≠ 0xa1 (vendor data; non-baseline traffic)
+//   (c) 0x6006 vendor "report text info" carrying an alcohol payload
+// Optional `bac` is the breath-alcohol reading if we can decode it.
+function emitAlcoholAlert(phone, source, parsed = {}) {
+  const alarmNumber = `${phone}-${Date.now()}`;
+  const entry = {
+    phone,
+    type: 'attachment_request',
+    alarmKind: 'ALCOHOL',
+    eventName: parsed.eventName || 'alcohol_detected',
+    alarmNumber,
+    source,
+    bac: parsed.bac,
+    threshold: parsed.threshold,
+    location: parsed.location,
+    raw: parsed.raw,
+  };
+  store.alerts.push({ ts: new Date().toISOString(), ...entry });
+  log.info(`ALCOHOL phone=${phone} src=${source} bac=${parsed.bac ?? '?'} alarmNumber=${alarmNumber}`);
+  return alarmNumber;
+}
+
+// 0x0900 transparent uplink decoder.
+//   Baseline payload we always see from a healthy ULV: a1 03 00 46 0a 01
+//     a1 = subtype (0xa1 = device status keepalive)
+//     03 = length
+//     00 46 0a 01 = status word (varies per firmware; suspected: state/temp/version)
+//   Any other subtype, or 0xa1 with a different payload, is treated as a candidate
+//   alcohol/peripheral event.
+const TRANSPARENT_BASELINE = 'a10300460a01';
+const TRANSPARENT_SUBTYPES = {
+  0xa1: 'device_status',
+  0xa2: 'alcohol_reading',       // suspected — confirm against device docs
+  0xa3: 'peripheral_data',       // generic UART passthrough
+  0xb0: 'tpms',
+  0xc0: 'fuel',
+};
+function decodeTransparent(body) {
+  const subType = body[0];
+  const subName = TRANSPARENT_SUBTYPES[subType] || `unknown_0x${subType.toString(16)}`;
+  // Best-effort BAC extraction when subType says alcohol_reading: 2 bytes BE = BAC * 1000 mg/L.
+  let bac;
+  if (subType === 0xa2 && body.length >= 4) {
+    const len = body[1];
+    if (len >= 2) bac = body.readUInt16BE(2) / 1000;
+  }
+  const isBaseline = body.toString('hex') === TRANSPARENT_BASELINE;
+  return { subType, subName, isBaseline, bac, hex: body.toString('hex') };
+}
+// --- end alcohol helpers ----------------------------------------------------
+
 function handle(socket, frame) {
   const { msgId, phone, serial, body, versionFlag, raw } = frame;
   const v = versionFlag;
@@ -133,6 +187,16 @@ function handle(socket, frame) {
       send(socket, `0x8001 0x0200-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
       log.info(`LOCATION phone=${phone} lat=${parsed.lat} lon=${parsed.lon} spd=${parsed.speed_kmh} dir=${parsed.direction} t=${parsed.time} alarms=${(parsed.alarms||[]).join(',') || 'none'}`);
 
+      // Alcohol alarm via alarmFlag bits 15 / 28
+      const alcoholBits = alcoholFromAlarmFlag(parseInt(parsed.alarmFlag || '0', 16));
+      if (alcoholBits.length) {
+        emitAlcoholAlert(phone, 'alarmFlag', {
+          eventName: alcoholBits[0],
+          location: { lat: parsed.lat, lon: parsed.lon, time: parsed.time, speed_kmh: parsed.speed_kmh, direction: parsed.direction },
+          raw: { bits: alcoholBits, alarmFlag: parsed.alarmFlag },
+        });
+      }
+
       const adasDsmBsd = (parsed.extras || []).filter(x => x.kind);
       const hasAlarm = (parsed.alarms && parsed.alarms.length) || adasDsmBsd.length;
       record(hasAlarm ? 'alert' : 'msg', { ...base, type: 'location', parsed });
@@ -160,6 +224,18 @@ function handle(socket, frame) {
       send(socket, `0x8001 0x0704-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
       const parsed = parseBulkLocation(body);
       log.info(`BULK_LOC phone=${phone} count=${parsed.count} firstLat=${parsed.items?.[0]?.lat} firstLon=${parsed.items?.[0]?.lon} t=${parsed.items?.[0]?.time}`);
+
+      // Alcohol check across all items
+      for (const it of parsed.items || []) {
+        const alcoholBits = alcoholFromAlarmFlag(parseInt(it.alarmFlag || '0', 16));
+        if (alcoholBits.length) {
+          emitAlcoholAlert(phone, 'alarmFlag', {
+            eventName: alcoholBits[0],
+            location: { lat: it.lat, lon: it.lon, time: it.time, speed_kmh: it.speed_kmh, direction: it.direction },
+            raw: { bits: alcoholBits, alarmFlag: it.alarmFlag },
+          });
+        }
+      }
       const anyAlarm = (parsed.items || []).some(it => (it.alarms && it.alarms.length) || (it.extras || []).some(x => x.kind));
       record(anyAlarm ? 'alert' : 'msg', { ...base, type: 'bulk_location', parsed });
       // If any inner item carries an ADAS/DSM/BSD extra, request the video evidence.
@@ -190,9 +266,32 @@ function handle(socket, frame) {
     }
     case 0x0900: { // ULV transparent data uplink
       send(socket, `0x8001 0x0900-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
-      const subType = body[0];
-      log.info(`TRANSPARENT phone=${phone} sub=0x${subType.toString(16)} hex=${body.toString('hex')}`);
-      record('msg', { ...base, type: 'transparent', parsed: { subType: '0x' + subType.toString(16), hex: body.toString('hex') } });
+      const decoded = decodeTransparent(body);
+      log.info(`TRANSPARENT phone=${phone} sub=0x${decoded.subType.toString(16)} (${decoded.subName}) ${decoded.isBaseline ? 'baseline' : 'NON-BASELINE'} hex=${decoded.hex}${decoded.bac != null ? ` bac=${decoded.bac}` : ''}`);
+      record(decoded.isBaseline ? 'msg' : 'alert', { ...base, type: 'transparent', parsed: { ...decoded, subType: '0x' + decoded.subType.toString(16) } });
+      if (!decoded.isBaseline) {
+        emitAlcoholAlert(phone, '0x0900', {
+          eventName: decoded.bac != null ? 'alcohol_reading' : decoded.subName,
+          bac: decoded.bac,
+          raw: { subType: '0x' + decoded.subType.toString(16), hex: decoded.hex },
+        });
+      }
+      return;
+    }
+    case 0x6006: { // ULV vendor "report text info" — often carries alcohol / peripheral text
+      send(socket, `0x8001 0x6006-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
+      const text = body.toString('utf8').replace(/[^\x20-\x7e]/g, '.');
+      const looksAlcohol = /alcohol|drunk|bac|ethanol|breath/i.test(text);
+      log.info(`REPORT_TEXT phone=${phone} alcohol=${looksAlcohol} text="${text}"`);
+      record('alert', { ...base, type: 'report_text', parsed: { text, alcohol: looksAlcohol } });
+      if (looksAlcohol) {
+        const bacMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:mg\/l|mg\/L|‰|%)/);
+        emitAlcoholAlert(phone, '0x6006', {
+          eventName: 'alcohol_text',
+          bac: bacMatch ? Number(bacMatch[1]) : undefined,
+          raw: { text },
+        });
+      }
       return;
     }
     case 0x0801: case 0x0800: case 0x0805: { // legacy multimedia

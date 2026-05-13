@@ -1,14 +1,45 @@
 // 0x0200 location report. Body: alarm(DWORD) status(DWORD) lat lon altitude(WORD)
 // speed(WORD, 1/10 km/h) direction(WORD) time(BCD6 YYMMDDhhmmss) + TLV extras.
 
+// 32 bits, indexed 0..31. JT/T 808-2019 + common ULV vendor extensions.
+// Some bits are vendor-repurposed (e.g. bit 15 / bit 28 carry alcohol on Starkenn).
 const ALARM_BITS = [
-  'sos', 'overspeed', 'fatigue', 'danger', 'gnss_module_fault', 'gnss_antenna_disconnect',
-  'gnss_antenna_short', 'lvss_low', 'lvss_off', 'comm_fault', 'sensitive_info', 'tach_fault',
-  '12','13','14','15',
-  'illegal_ignition','illegal_displacement','collision','rollover','sos_b','overspeed_b',
-  'driving_overtime','timeout_park','area_in_out','route_in_out','route_time','offline','card',
-  '27','28','collision_warn','rollover_warn','illegal_open'
+  'sos',                       // 0
+  'overspeed',                 // 1
+  'fatigue_driving',           // 2
+  'danger_warning',            // 3
+  'gnss_module_fault',         // 4
+  'gnss_antenna_disconnect',   // 5
+  'gnss_antenna_short',        // 6
+  'lvss_undervoltage',         // 7
+  'lvss_power_off',            // 8
+  'lcd_fault',                 // 9
+  'tts_fault',                 // 10
+  'camera_fault',              // 11
+  'road_card_fault',           // 12
+  'overspeed_warning',         // 13
+  'fatigue_warning',           // 14
+  'alcohol_drunk_driving',     // 15  ← vendor-extension: alcohol >= drunk threshold
+  'timeout_parking',           // 16
+  'zone_in_out',               // 17
+  'route_in_out',              // 18
+  'route_segment_time',        // 19
+  'route_deviation',           // 20
+  'vss_fault',                 // 21
+  'oil_abnormal',              // 22
+  'vehicle_stolen',            // 23
+  'illegal_ignition',          // 24
+  'illegal_displacement',      // 25
+  'collision_alarm',           // 26
+  'rollover_alarm',            // 27
+  'alcohol_warning',           // 28  ← vendor-extension: alcohol >= warning threshold
+  'collision_warning',         // 29
+  'rollover_warning',          // 30
+  'illegal_door_open',         // 31
 ];
+
+// Bits that mean "alcohol detector tripped" so callers can route to the alcohol pipeline.
+const ALCOHOL_BITS = [15, 28];
 
 function decodeBcdTime(buf) {
   // YYMMDDhhmmss -> "20YY-MM-DD HH:MM:SS"
@@ -113,4 +144,8 @@ function parseBulkLocation(body) {
   return { count, dataType, items };
 }
 
-module.exports = { parseLocation, parseBulkLocation, parseAlarmId };
+function alcoholFromAlarmFlag(n) {
+  return ALCOHOL_BITS.filter(b => n & (1 << b)).map(b => ALARM_BITS[b]);
+}
+
+module.exports = { parseLocation, parseBulkLocation, parseAlarmId, alcoholFromAlarmFlag, ALARM_BITS, ALCOHOL_BITS };
