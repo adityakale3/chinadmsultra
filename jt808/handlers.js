@@ -209,6 +209,23 @@ function handle(socket, frame) {
       const parsed = parseLocation(body);
       send(socket, `0x8001 0x0200-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
       log.info(`LOCATION phone=${phone} lat=${parsed.lat} lon=${parsed.lon} spd=${parsed.speed_kmh} dir=${parsed.direction} t=${parsed.time} alarms=${(parsed.alarms||[]).join(',') || 'none'}`);
+
+      // Publish to MQTT ORG topic (m3 frontend listens here for live tracking).
+      if (typeof mqttPub.publishLocation === 'function' && parsed.lat != null && parsed.lon != null) {
+        try {
+          mqttPub.publishLocation({
+            hmiId: hmiFor(phone),
+            phone,
+            lat: parsed.lat, lon: parsed.lon,
+            altitude: parsed.altitude,
+            speed_kmh: parsed.speed_kmh,
+            direction: parsed.direction,
+            time: parsed.time,
+            alarmFlag: parsed.alarmFlag,
+            status: parsed.status,
+          });
+        } catch (e) { log.warn(`publishLocation 0x0200: ${e.message}`); }
+      }
       // Publish LOC to Starkenn MQTT
       mqttPub.publishLocation({
         hmiId: hmiFor(phone), lat: parsed.lat, lon: parsed.lon,
@@ -260,6 +277,29 @@ function handle(socket, frame) {
       send(socket, `0x8001 0x0704-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
       const parsed = parseBulkLocation(body);
       log.info(`BULK_LOC phone=${phone} count=${parsed.count} firstLat=${parsed.items?.[0]?.lat} firstLon=${parsed.items?.[0]?.lon} t=${parsed.items?.[0]?.time}`);
+
+      // Live-only publish: only push the most recent item with a valid GPS lock
+      // to the ORG topic so we don't spam the frontend with historical backlog.
+      // dataType: 0 = current, 1 = blind-area supplement (offline backlog).
+      if (typeof mqttPub.publishLocation === 'function') {
+        for (const it of parsed.items || []) {
+          if (parsed.dataType !== 0) continue;
+          if (it.lat == null || it.lon == null || (it.lat === 0 && it.lon === 0)) continue;
+          try {
+            mqttPub.publishLocation({
+              hmiId: hmiFor(phone),
+              phone,
+              lat: it.lat, lon: it.lon,
+              altitude: it.altitude,
+              speed_kmh: it.speed_kmh,
+              direction: it.direction,
+              time: it.time,
+              alarmFlag: it.alarmFlag,
+              status: it.status,
+            });
+          } catch (e) { log.warn(`publishLocation 0x0704: ${e.message}`); }
+        }
+      }
 
       // Publish LOC + alcohol bits for each item
       for (const it of parsed.items || []) {
