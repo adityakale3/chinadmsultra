@@ -1,6 +1,7 @@
 const { encode } = require('./codec');
 const { parseLocation, parseBulkLocation, alcoholFromAlarmFlag } = require('./parse-location');
 const store = require('../store');
+const persist = require('../persist');
 const mqttPub = require('../mqtt-publisher');
 const alertPub = require('../alert-publisher');
 const { make } = require('../logger');
@@ -77,8 +78,14 @@ function build9208(phone, alarmIdBuf, alarmNumber32, version2019) {
 }
 
 function record(kind, entry) {
-  store.messages.push({ ts: new Date().toISOString(), ...entry });
-  if (kind === 'alert') store.alerts.push({ ts: new Date().toISOString(), ...entry });
+  const stamped = { ts: new Date().toISOString(), ...entry };
+  store.messages.push(stamped);
+  if (kind === 'alert') {
+    store.alerts.push(stamped);
+    // Persist only the alarm records that carry lat/lon/eventName — these are
+    // what the dashboard's GPS / event-name columns rely on after a restart.
+    if (stamped.type === 'attachment_request') persist.appendAlert(stamped);
+  }
 }
 
 function send(socket, label, buf) {

@@ -9,7 +9,16 @@ const handlers = require('./jt808/handlers');
 const attachmentServer = require('./attachment-server');
 const mqttPub = require('./mqtt-publisher');
 const store = require('./store');
+const persist = require('./persist');
 const { make } = require('./logger');
+
+// Hydrate the in-memory alerts ring from disk so lat/lon/event-name survive
+// PM2 restarts. Without this every restart blanks the GPS column on past rows.
+{
+  const saved = persist.loadAlerts();
+  for (const a of saved) store.alerts.push(a);
+  if (saved.length) console.log(`[BOOT] hydrated ${saved.length} alerts from disk`);
+}
 
 const HTTP_PORT       = Number(process.env.HTTP_PORT       || 3000);
 const JT808_PORT      = Number(process.env.JT808_PORT      || 7611);
@@ -176,7 +185,8 @@ app.get('/terminals', (_, res) => {
 
 app.get('/mqtt-stats',  (_, res) => res.json(mqttPub.stats()));
 app.get('/s3-stats',    (_, res) => res.json(require('./s3-uploader').stats()));
-app.get('/alert-stats', (_, res) => res.json(require('./alert-publisher').stats()));
+app.get('/alert-stats',   (_, res) => res.json(require('./alert-publisher').stats()));
+app.get('/persist-stats', (_, res) => res.json(persist.stats()));
 
 // /events — group alarms with their evidence files into one event per alarm.
 // Joins on alarmNumber (the "<phone>-<timestamp>" tag we put in 0x9208).
