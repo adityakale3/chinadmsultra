@@ -1,8 +1,15 @@
 const { encode } = require('./codec');
 const { parseLocation, parseBulkLocation, alcoholFromAlarmFlag } = require('./parse-location');
 const store = require('../store');
+const mqttPub = require('../mqtt-publisher');
+const alertPub = require('../alert-publisher');
 const { make } = require('../logger');
 const log = make('JT808');
+
+// HMI map (phone → HMIID/title) is injected from server.js after boot.
+let HMI_MAP = {};
+function setHmiMap(m) { HMI_MAP = m || {}; }
+const hmiFor = phone => HMI_MAP[phone];
 
 const ATTACHMENT_HOST = process.env.ATTACHMENT_HOST || '13.206.186.1';
 const ATTACHMENT_TCP_PORT = Number(process.env.ATTACHMENT_TCP_PORT || 7612);
@@ -118,18 +125,34 @@ const TRANSPARENT_SUBTYPES = {
   0xa3: 'peripheral_data',       // generic UART passthrough
   0xb0: 'tpms',
   0xc0: 'fuel',
+  0xf2: 'device_identity',       // IMEI + ICCID — sent at register / periodic
 };
+// Decode known subtypes into structured fields. Returns null if unknown.
+function decodePayload(subType, body) {
+  // 0xf2: f2 <flag2B> <len><asciiIMEI> <len><asciiICCID>
+  if (subType === 0xf2 && body.length > 3) {
+    try {
+      let p = 3, fields = {};
+      const lenA = body[p++];
+      fields.imei = body.slice(p, p + lenA).toString('ascii'); p += lenA;
+      const lenB = body[p++];
+      fields.iccid = body.slice(p, p + lenB).toString('ascii'); p += lenB;
+      return fields;
+    } catch { return null; }
+  }
+  // 0xa2: <subType><len><BAC hi><BAC lo>...   BAC = uint16BE / 1000  (mg/L, speculative)
+  if (subType === 0xa2 && body.length >= 4) {
+    const len = body[1];
+    if (len >= 2) return { bac: body.readUInt16BE(2) / 1000 };
+  }
+  return null;
+}
 function decodeTransparent(body) {
   const subType = body[0];
   const subName = TRANSPARENT_SUBTYPES[subType] || `unknown_0x${subType.toString(16)}`;
-  // Best-effort BAC extraction when subType says alcohol_reading: 2 bytes BE = BAC * 1000 mg/L.
-  let bac;
-  if (subType === 0xa2 && body.length >= 4) {
-    const len = body[1];
-    if (len >= 2) bac = body.readUInt16BE(2) / 1000;
-  }
   const isBaseline = body.toString('hex') === TRANSPARENT_BASELINE;
-  return { subType, subName, isBaseline, bac, hex: body.toString('hex') };
+  const fields = decodePayload(subType, body) || {};
+  return { subType, subName, isBaseline, ...fields, hex: body.toString('hex') };
 }
 // --- end alcohol helpers ----------------------------------------------------
 
@@ -186,6 +209,11 @@ function handle(socket, frame) {
       const parsed = parseLocation(body);
       send(socket, `0x8001 0x0200-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
       log.info(`LOCATION phone=${phone} lat=${parsed.lat} lon=${parsed.lon} spd=${parsed.speed_kmh} dir=${parsed.direction} t=${parsed.time} alarms=${(parsed.alarms||[]).join(',') || 'none'}`);
+      // Publish LOC to Starkenn MQTT
+      mqttPub.publishLocation({
+        hmiId: hmiFor(phone), lat: parsed.lat, lon: parsed.lon,
+        speed_kmh: parsed.speed_kmh, direction: parsed.direction,
+      });
 
       // Alcohol alarm via alarmFlag bits 15 / 28
       const alcoholBits = alcoholFromAlarmFlag(parseInt(parsed.alarmFlag || '0', 16));
@@ -217,6 +245,14 @@ function handle(socket, frame) {
           alarmIdentification: ev.alarmIdentification,
           location: { lat: parsed.lat, lon: parsed.lon, time: parsed.time, speed_kmh: parsed.speed_kmh, direction: parsed.direction },
         });
+        // Queue alarm — alert-publisher will fire to MQTT once media files
+        // arrive (or after timeout if they don't).
+        alertPub.queueAlarm({
+          alarmNumber: alarmNumberStr,
+          hmiId: hmiFor(phone), alarmKind: ev.kind, eventTypeHex: ev.eventType,
+          lat: parsed.lat, lon: parsed.lon,
+          speed_kmh: parsed.speed_kmh, direction: parsed.direction,
+        });
       }
       return;
     }
@@ -225,14 +261,22 @@ function handle(socket, frame) {
       const parsed = parseBulkLocation(body);
       log.info(`BULK_LOC phone=${phone} count=${parsed.count} firstLat=${parsed.items?.[0]?.lat} firstLon=${parsed.items?.[0]?.lon} t=${parsed.items?.[0]?.time}`);
 
-      // Alcohol check across all items
+      // Publish LOC + alcohol bits for each item
       for (const it of parsed.items || []) {
+        mqttPub.publishLocation({
+          hmiId: hmiFor(phone), lat: it.lat, lon: it.lon,
+          speed_kmh: it.speed_kmh, direction: it.direction,
+        });
         const alcoholBits = alcoholFromAlarmFlag(parseInt(it.alarmFlag || '0', 16));
         if (alcoholBits.length) {
           emitAlcoholAlert(phone, 'alarmFlag', {
             eventName: alcoholBits[0],
             location: { lat: it.lat, lon: it.lon, time: it.time, speed_kmh: it.speed_kmh, direction: it.direction },
             raw: { bits: alcoholBits, alarmFlag: it.alarmFlag },
+          });
+          mqttPub.publishAlert({
+            hmiId: hmiFor(phone), alarmKind: 'ALCOHOL', eventTypeHex: 0x32,
+            lat: it.lat, lon: it.lon, speed_kmh: it.speed_kmh, direction: it.direction,
           });
         }
       }
@@ -260,6 +304,11 @@ function handle(socket, frame) {
             alarmIdentification: ev.alarmIdentification,
             location: { lat: it.lat, lon: it.lon, time: it.time, speed_kmh: it.speed_kmh, direction: it.direction },
           });
+          alertPub.queueAlarm({
+            alarmNumber: alarmNumberStr,
+            hmiId: hmiFor(phone), alarmKind: ev.kind, eventTypeHex: ev.eventType,
+            lat: it.lat, lon: it.lon, speed_kmh: it.speed_kmh, direction: it.direction,
+          });
         }
       }
       return;
@@ -267,11 +316,17 @@ function handle(socket, frame) {
     case 0x0900: { // ULV transparent data uplink
       send(socket, `0x8001 0x0900-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));
       const decoded = decodeTransparent(body);
-      log.info(`TRANSPARENT phone=${phone} sub=0x${decoded.subType.toString(16)} (${decoded.subName}) ${decoded.isBaseline ? 'baseline' : 'NON-BASELINE'} hex=${decoded.hex}${decoded.bac != null ? ` bac=${decoded.bac}` : ''}`);
-      record(decoded.isBaseline ? 'msg' : 'alert', { ...base, type: 'transparent', parsed: { ...decoded, subType: '0x' + decoded.subType.toString(16) } });
-      if (!decoded.isBaseline) {
+      const note = decoded.imei  ? ` imei=${decoded.imei} iccid=${decoded.iccid}`
+                 : decoded.bac != null ? ` bac=${decoded.bac}`
+                 : '';
+      log.info(`TRANSPARENT phone=${phone} sub=0x${decoded.subType.toString(16)} (${decoded.subName})${note}`);
+      // Only treat subtype 0xa2 as a real alcohol reading. Everything else
+      // (identity 0xf2, status 0xa1, unknown vendor pings) is just informational.
+      const isAlcohol = decoded.subType === 0xa2;
+      record(isAlcohol ? 'alert' : 'msg', { ...base, type: 'transparent', parsed: { ...decoded, subType: '0x' + decoded.subType.toString(16) } });
+      if (isAlcohol) {
         emitAlcoholAlert(phone, '0x0900', {
-          eventName: decoded.bac != null ? 'alcohol_reading' : decoded.subName,
+          eventName: 'alcohol_reading',
           bac: decoded.bac,
           raw: { subType: '0x' + decoded.subType.toString(16), hex: decoded.hex },
         });
@@ -324,4 +379,4 @@ function extractAlarmIdBytes(locationBody, idHex) {
   return null;
 }
 
-module.exports = { handle };
+module.exports = { handle, setHmiMap };

@@ -7,8 +7,15 @@ const fs = require('fs');
 const path = require('path');
 const { extractFrames, decode, encode } = require('./jt808/codec');
 const store = require('./store');
+const alertPub = require('./alert-publisher');
 const { make } = require('./logger');
 const log = make('ATTACH');
+
+// Pull "<phone>-<ms>" alarmNumber out of the JT/T 1078 filename.
+function alarmNumberFromFilename(fname) {
+  const m = fname && fname.match(/^\d+_\d+_[0-9a-fA-F]+_\d+_(.+?)\.[^.]+$/);
+  return m ? m[1] : null;
+}
 
 const MEDIA_DIR = path.resolve(__dirname, 'media');
 const BITSTREAM_MAGIC = Buffer.from([0x30, 0x31, 0x63, 0x64]);
@@ -141,6 +148,9 @@ function handleSignaling(socket, frame, openFiles, version2019) {
       }
       socket.write(genericResponse(phone, serial, msgId, version2019));
       log.info(`1210 phone=${phone} alarmId=${alarmId} files=${JSON.stringify(files)}`);
+      // Tell the alert-publisher how many files to expect for this alarm.
+      const an = files[0] ? alarmNumberFromFilename(files[0].fname) : null;
+      if (an) alertPub.setExpectedFiles(an, files.length);
       store.messages.push({ ts: new Date().toISOString(), type: 'attach_1210', phone, termId, alarmId, alarmNumber, infoType, files });
       return;
     }
@@ -174,6 +184,13 @@ function handleSignaling(socket, frame, openFiles, version2019) {
       const alarmType = m ? m[3] : null;
       log.info(`1212 phone=${phone} done "${fname}" alarmNumber=${alarmNumber} wroteBytes=${wrote} -> ${safe}`);
       store.media.push({ ts: new Date().toISOString(), source: 'alarm_attachment', phone, fname, fileType, alarmNumber, alarmType, path: safe, bytes: wrote });
+      // Hand off to the alert-publisher: it'll upload this file to S3 and fire
+      // the MQTT alert once all expected files for this alarmNumber arrive.
+      // alertPub knows the hmiId from when the alarm was queued.
+      if (alarmNumber) {
+        alertPub.attachMedia({ alarmNumber, localPath: safe, filename: fname })
+          .catch(e => log.warn(`attachMedia error: ${e.message}`));
+      }
       return;
     }
     default:

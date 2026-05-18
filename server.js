@@ -7,6 +7,7 @@ const { FtpSrv, FileSystem } = require('ftp-srv');
 const { extractFrames, decode } = require('./jt808/codec');
 const handlers = require('./jt808/handlers');
 const attachmentServer = require('./attachment-server');
+const mqttPub = require('./mqtt-publisher');
 const store = require('./store');
 const { make } = require('./logger');
 
@@ -75,6 +76,9 @@ jt808.on('error', (e) => log.error(`server error: ${e.message}`));
 
 // ---------- Attachment TCP server ----------
 attachmentServer.start(ATTACHMENT_PORT);
+
+// ---------- MQTT publisher (Starkenn production) ----------
+mqttPub.start();
 
 // ---------- FTP server ----------
 const ftp = new FtpSrv({
@@ -170,6 +174,10 @@ app.get('/terminals', (_, res) => {
   res.json([...store.terminals.values()].map(safeTerminal));
 });
 
+app.get('/mqtt-stats',  (_, res) => res.json(mqttPub.stats()));
+app.get('/s3-stats',    (_, res) => res.json(require('./s3-uploader').stats()));
+app.get('/alert-stats', (_, res) => res.json(require('./alert-publisher').stats()));
+
 // /events — group alarms with their evidence files into one event per alarm.
 // Joins on alarmNumber (the "<phone>-<timestamp>" tag we put in 0x9208).
 const ALARM_TYPE_NAME = {
@@ -183,14 +191,12 @@ const ALARM_TYPE_NAME = {
   '6601':'rear_approach', '6602':'left_approach', '6603':'right_approach',
 };
 
-// Map of known device phones → human-readable title. Edit as fleet grows.
-const PHONE_TITLES = {
-  '806072880208': 'U-N5C',
-  '693071056712': 'U-N61',
-  '4133159891':   'Skywonder',
-  '77076779167':  'U-S61',
-};
+// Map of known device phones → human-readable title (== Starkenn HMIID).
+// Edit as fleet grows; each title must exist in datacollect.HMI on the platform side.
+const PHONE_TITLES = require('./hmi-map');
 const titleFor = phone => PHONE_TITLES[phone] || '';
+// Make the map available to handlers (for MQTT publishing).
+require('./jt808/handlers').setHmiMap?.(PHONE_TITLES);
 
 // Parse the ULV alarm filename: <type>_<channel>_<alarmType>_<seq>_<alarmNumber>.<ext>
 // alarmNumber = "<phone>-<timestampMs>" — the same string we sent in 0x9208.
