@@ -283,13 +283,88 @@ app.post('/cmd/:phone/ulv-json', async (req, res) => {
 
 app.get('/cmd-history', (_, res) => res.json(cmd.listHistory()));
 
+// Aggregate device snapshot — used by both the HTML page and the JS auto-refresh.
+function deviceSnapshot(phone) {
+  const t = store.terminals.get(phone);
+  const messages = store.messages.list().filter(m => m.phone === phone);
+  const alerts   = store.alerts.list().filter(a => a.phone === phone);
+  const history  = cmd.listHistory().filter(c => c.phone === phone);
+  const counts = {
+    total: messages.length,
+    location: messages.filter(m => m.type === 'location').length,
+    bulk_location: messages.filter(m => m.type === 'bulk_location').length,
+    heartbeat: messages.filter(m => m.type === 'heartbeat').length,
+    transparent: messages.filter(m => m.type === 'transparent').length,
+    register: messages.filter(m => m.type === 'register').length,
+    auth: messages.filter(m => m.type === 'auth').length,
+    ack: messages.filter(m => m.type === 'ack').length,
+    alerts: alerts.length,
+    commands: history.length,
+  };
+  // Files for this device on disk
+  let files = [];
+  try {
+    files = fs.readdirSync(MEDIA_DIR)
+      .filter(f => f.includes(phone))
+      .map(f => {
+        const st = fs.statSync(path.join(MEDIA_DIR, f));
+        return { fname: f, size: st.size, mtime: st.mtime, url: `/media/${encodeURIComponent(f)}` };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+  } catch {}
+  return {
+    phone,
+    title: PHONE_TITLES[phone] || '',
+    online: !!(t && t.socket && !t.socket.destroyed),
+    lastSeen: t ? t.lastSeen : null,
+    peer: t && t.socket ? `${t.socket.remoteAddress}:${t.socket.remotePort}` : null,
+    authCode: t ? t.authCode : null,
+    version2019: t ? t.version2019 : null,
+    counts,
+    lastLocation: messages.find(m => m.type === 'location' || m.type === 'bulk_location') || null,
+    locations: messages.filter(m => m.type === 'location' || m.type === 'bulk_location').slice(0, 100),
+    alerts: alerts.slice(0, 50),
+    commands: history.slice(0, 50),
+    files: files.slice(0, 100),
+  };
+}
+
+app.get('/device/:phone/data', (req, res) => res.json(deviceSnapshot(req.params.phone)));
+
+app.get('/device/:phone', (req, res) => {
+  const snap = deviceSnapshot(req.params.phone);
+  res.render('device', { d: snap });
+});
+
 app.get('/control', (_, res) => {
-  const terms = [...store.terminals.values()].map(t => ({
-    phone: t.phone, title: PHONE_TITLES[t.phone] || '',
-    lastSeen: t.lastSeen, registered: !!t.registered,
-    online: !!(t.socket && !t.socket.destroyed),
-  }));
-  res.render('control', { terminals: terms, phoneTitles: PHONE_TITLES });
+  // Source the device list from the registered HMI map (hmi-map.js).
+  // For each entry, overlay live state from store.terminals when present.
+  const registered = Object.entries(PHONE_TITLES).map(([phone, title]) => {
+    const t = store.terminals.get(phone);
+    return {
+      phone,
+      title,
+      online: !!(t && t.socket && !t.socket.destroyed),
+      lastSeen: t ? t.lastSeen : null,
+    };
+  }).sort((a, b) => a.title.localeCompare(b.title));
+
+  // Also surface any *connected* phones that aren't in the HMI map yet, so
+  // a newly-paired device is reachable from the panel before it's registered.
+  const knownPhones = new Set(Object.keys(PHONE_TITLES));
+  const unregistered = [...store.terminals.values()]
+    .filter(t => !knownPhones.has(t.phone))
+    .map(t => ({
+      phone: t.phone,
+      title: '(unregistered)',
+      online: !!(t.socket && !t.socket.destroyed),
+      lastSeen: t.lastSeen,
+    }));
+
+  res.render('control', {
+    terminals: [...registered, ...unregistered],
+    phoneTitles: PHONE_TITLES,
+  });
 });
 
 app.post('/cmd/:phone/control', async (req, res) => {

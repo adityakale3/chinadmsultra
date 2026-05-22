@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Device — <%= d.title || d.phone %></title>
+  <style>
+    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; margin: 0; background: #0e1116; color: #e7eaf0; }
+    header { padding: 14px 22px; background: #161a22; border-bottom: 1px solid #232a36; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+    header h1 { font-size: 18px; margin: 0; }
+    header .sub { color: #8a93a3; font-size: 12px; font-family: ui-monospace, SF Mono, Menlo, Consolas, monospace; }
+    header a { color: #79b8ff; text-decoration: none; font-size: 13px; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+    .dot.on  { background: #22c55e; }
+    .dot.off { background: #ef4444; }
+    main { padding: 18px 22px; max-width: 1280px; margin: 0 auto; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px,1fr)); gap: 12px; margin-bottom: 18px; }
+    .card { background: #161a22; border: 1px solid #232a36; border-radius: 6px; padding: 12px 14px; }
+    .card .v { font-size: 22px; font-weight: 700; }
+    .card .k { font-size: 11px; color: #8a93a3; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+    section { background: #161a22; border: 1px solid #232a36; border-radius: 6px; margin-bottom: 18px; }
+    section h2 { font-size: 12px; margin: 0; padding: 10px 14px; color: #b9c1d0; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #232a36; display: flex; justify-content: space-between; align-items: center; }
+    section h2 .count { font-size: 11px; color: #8a93a3; font-weight: normal; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid #1d232e; font-size: 12px; vertical-align: top; }
+    th { background: #1d232e; color: #b9c1d0; font-weight: 600; }
+    tr:hover { background: #1a212c; }
+    .mono { font-family: ui-monospace, SF Mono, Menlo, Consolas, monospace; }
+    .meta { color: #8a93a3; font-size: 12px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+    .pill.DSM { background: #fef3c7; color: #92400e; }
+    .pill.ADAS { background: #dbeafe; color: #1e3a8a; }
+    .pill.BSD { background: #d1fae5; color: #065f46; }
+    .pill.ALCOHOL { background: #fecaca; color: #7f1d1d; }
+    .pill.FTP { background: #e9d5ff; color: #4c1d95; }
+    .ack-ok { color: #22c55e; }
+    .ack-fail { color: #ef4444; }
+    .ack-pending { color: #f59e0b; }
+    .empty { padding: 18px; text-align: center; color: #8a93a3; font-size: 12px; }
+    a.maps { color: #79b8ff; text-decoration: none; }
+    .files-list a { color: #79b8ff; text-decoration: none; margin-right: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><%= d.title || '(unregistered)' %></h1>
+    <span class="sub">phone <%= d.phone %></span>
+    <span><span class="dot <%= d.online ? 'on' : 'off' %>"></span><span id="connText"><%= d.online ? 'online' : 'offline' %></span></span>
+    <span class="sub" id="lastSeen">last seen <%= d.lastSeen || 'never' %></span>
+    <% if (d.peer) { %><span class="sub" id="peer">peer <%= d.peer %></span><% } %>
+    <a href="/dashboard" style="margin-left:auto">← Dashboard</a>
+    <a href="/control">Control Panel →</a>
+  </header>
+
+  <main>
+
+    <!-- KPI cards -->
+    <div class="cards" id="cards">
+      <div class="card"><div class="v" id="c_total"><%= d.counts.total %></div><div class="k">Total frames</div></div>
+      <div class="card"><div class="v" id="c_loc"><%= d.counts.location + d.counts.bulk_location %></div><div class="k">Locations</div></div>
+      <div class="card"><div class="v" id="c_hb"><%= d.counts.heartbeat %></div><div class="k">Heartbeats</div></div>
+      <div class="card"><div class="v" id="c_al"><%= d.counts.alerts %></div><div class="k">Alerts</div></div>
+      <div class="card"><div class="v" id="c_tr"><%= d.counts.transparent %></div><div class="k">Transparent</div></div>
+      <div class="card"><div class="v" id="c_ack"><%= d.counts.ack %></div><div class="k">Device ACKs</div></div>
+      <div class="card"><div class="v" id="c_reg"><%= d.counts.register %></div><div class="k">Registers</div></div>
+      <div class="card"><div class="v" id="c_cmd"><%= d.counts.commands %></div><div class="k">Cmds sent</div></div>
+    </div>
+
+    <!-- Last known location -->
+    <section>
+      <h2>Last known location <span class="count" id="lastLocTs"></span></h2>
+      <% if (d.lastLocation) { %>
+        <% const item = d.lastLocation.parsed?.items?.[0] || d.lastLocation.parsed || {}; %>
+        <table>
+          <tr><th>Lat / Lon</th><td>
+            <% if (item.lat != null && item.lon != null) { %>
+              <a class="maps" target="_blank" href="https://www.google.com/maps?q=<%= item.lat %>,<%= item.lon %>"><%= item.lat %>, <%= item.lon %></a>
+            <% } else { %>—<% } %>
+          </td></tr>
+          <tr><th>Device time</th><td class="mono"><%= item.time || '—' %></td></tr>
+          <tr><th>Speed</th><td><%= item.speed_kmh != null ? item.speed_kmh + ' km/h' : '—' %></td></tr>
+          <tr><th>Direction</th><td><%= item.direction != null ? item.direction + '°' : '—' %></td></tr>
+          <tr><th>Altitude</th><td><%= item.altitude != null ? item.altitude + ' m' : '—' %></td></tr>
+          <tr><th>Alarms</th><td><%= (item.alarms || []).join(', ') || '—' %></td></tr>
+          <tr><th>Server received</th><td class="meta mono"><%= d.lastLocation.ts %></td></tr>
+        </table>
+      <% } else { %>
+        <div class="empty">No location received yet.</div>
+      <% } %>
+    </section>
+
+    <!-- Connection info -->
+    <section>
+      <h2>Connection</h2>
+      <table>
+        <tr><th>Auth code</th><td class="mono"><%= d.authCode || '—' %></td></tr>
+        <tr><th>JT808 version</th><td><%= d.version2019 === true ? '2019' : d.version2019 === false ? '2013' : '—' %></td></tr>
+        <tr><th>Peer</th><td class="mono"><%= d.peer || '—' %></td></tr>
+        <tr><th>Last seen</th><td class="mono"><%= d.lastSeen || 'never' %></td></tr>
+      </table>
+    </section>
+
+    <!-- Recent alerts -->
+    <section>
+      <h2>Recent alerts <span class="count"><%= d.alerts.length %> shown</span></h2>
+      <% if (!d.alerts.length) { %>
+        <div class="empty">No alerts.</div>
+      <% } else { %>
+        <table>
+          <thead><tr><th>When</th><th>Type</th><th>Event</th><th>Lat / Lon</th><th>Alarm #</th></tr></thead>
+          <tbody id="alertsBody">
+            <% d.alerts.forEach(a => { %>
+              <tr>
+                <td class="mono"><%= new Date(a.ts).toLocaleString() %></td>
+                <td><% if (a.alarmKind) { %><span class="pill <%= a.alarmKind %>"><%= a.alarmKind %></span><% } else if (a.type) { %><span class="meta"><%= a.type %></span><% } %></td>
+                <td><%= a.eventName || a.msgId || '' %></td>
+                <td>
+                  <% if (a.location?.lat != null) { %>
+                    <a class="maps" target="_blank" href="https://www.google.com/maps?q=<%= a.location.lat %>,<%= a.location.lon %>"><%= a.location.lat.toFixed(6) %>, <%= a.location.lon.toFixed(6) %></a>
+                  <% } else { %>—<% } %>
+                </td>
+                <td class="mono"><%= a.alarmNumber || '' %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      <% } %>
+    </section>
+
+    <!-- Recent location frames -->
+    <section>
+      <h2>Recent location frames <span class="count"><%= d.locations.length %> shown</span></h2>
+      <% if (!d.locations.length) { %>
+        <div class="empty">No location frames yet.</div>
+      <% } else { %>
+        <table>
+          <thead><tr><th>Server time</th><th>Device time</th><th>Lat / Lon</th><th>Speed</th><th>Dir</th><th>Alarms</th><th>Type</th></tr></thead>
+          <tbody id="locBody">
+            <% d.locations.forEach(m => {
+                 const item = m.parsed?.items?.[0] || m.parsed || {}; %>
+              <tr>
+                <td class="mono"><%= new Date(m.ts).toLocaleTimeString() %></td>
+                <td class="mono"><%= item.time || '—' %></td>
+                <td>
+                  <% if (item.lat != null && item.lon != null && (item.lat || item.lon)) { %>
+                    <a class="maps" target="_blank" href="https://www.google.com/maps?q=<%= item.lat %>,<%= item.lon %>"><%= item.lat %>, <%= item.lon %></a>
+                  <% } else { %><span class="meta">no fix</span><% } %>
+                </td>
+                <td><%= item.speed_kmh != null ? item.speed_kmh : '—' %></td>
+                <td><%= item.direction != null ? item.direction : '—' %></td>
+                <td><%= (item.alarms || []).join(',') || '—' %></td>
+                <td class="meta"><%= m.type %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      <% } %>
+    </section>
+
+    <!-- Commands history -->
+    <section>
+      <h2>Commands sent to this device <span class="count"><%= d.commands.length %> shown</span></h2>
+      <% if (!d.commands.length) { %>
+        <div class="empty">No commands sent yet. <a href="/control" style="color:#79b8ff">Send one →</a></div>
+      <% } else { %>
+        <table>
+          <thead><tr><th>When</th><th>Msg ID</th><th>Label</th><th>Body (hex)</th><th>ACK</th></tr></thead>
+          <tbody id="cmdBody">
+            <% d.commands.forEach(c => {
+                 const cls = !c.ack ? 'ack-pending' : (c.ack.result === 0 ? 'ack-ok' : 'ack-fail'); %>
+              <tr>
+                <td class="mono"><%= new Date(c.ts).toLocaleString() %></td>
+                <td class="mono"><%= c.msgIdHex %></td>
+                <td><%= c.label || '' %></td>
+                <td class="mono" style="font-size:10px;max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><%= c.bodyHex %></td>
+                <td class="<%= cls %> mono">
+                  <% if (!c.ack) { %>pending…<% } else { %><%= c.ack.resultName %><% } %>
+                </td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      <% } %>
+    </section>
+
+    <!-- Files -->
+    <section>
+      <h2>Media files for this device <span class="count"><%= d.files.length %> on disk</span></h2>
+      <% if (!d.files.length) { %>
+        <div class="empty">No media files yet.</div>
+      <% } else { %>
+        <table>
+          <thead><tr><th>When</th><th>Filename</th><th>Size</th><th>Open</th></tr></thead>
+          <tbody>
+            <% d.files.forEach(f => { %>
+              <tr>
+                <td class="mono"><%= new Date(f.mtime).toLocaleString() %></td>
+                <td class="mono"><%= f.fname %></td>
+                <td class="mono"><%= (f.size/1024).toFixed(0) %> KB</td>
+                <td><a class="maps" href="<%= f.url %>" target="_blank">open</a></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      <% } %>
+    </section>
+
+  </main>
+
+<script>
+  // Light auto-refresh: pull JSON, update counters + online dot + tables every 5s.
+  async function refresh() {
+    try {
+      const r = await fetch(location.pathname + '/data').then(r => r.json());
+      // KPIs
+      document.getElementById('c_total').textContent = r.counts.total;
+      document.getElementById('c_loc').textContent = r.counts.location + r.counts.bulk_location;
+      document.getElementById('c_hb').textContent = r.counts.heartbeat;
+      document.getElementById('c_al').textContent = r.counts.alerts;
+      document.getElementById('c_tr').textContent = r.counts.transparent;
+      document.getElementById('c_ack').textContent = r.counts.ack;
+      document.getElementById('c_reg').textContent = r.counts.register;
+      document.getElementById('c_cmd').textContent = r.counts.commands;
+      // Header
+      const dot = document.querySelector('.dot');
+      dot.classList.toggle('on',  r.online);
+      dot.classList.toggle('off', !r.online);
+      document.getElementById('connText').textContent = r.online ? 'online' : 'offline';
+      if (r.lastSeen) document.getElementById('lastSeen').textContent = 'last seen ' + r.lastSeen;
+    } catch {}
+  }
+  setInterval(refresh, 5000);
+</script>
+</body>
+</html>

@@ -59,6 +59,7 @@
       <% }) %>
     </select>
     <span id="conn"></span>
+    <a id="deviceLink" href="#" style="color:#79b8ff;text-decoration:none;font-size:13px;display:none">device details →</a>
     <a href="/dashboard" style="color:#79b8ff;text-decoration:none;font-size:13px;margin-left:auto">← Dashboard</a>
   </header>
 
@@ -422,9 +423,11 @@ setInterval(refreshHistory, 2500);
 // device connectivity dot
 $('device').onchange = () => {
   const opt = $('device').selectedOptions[0];
-  if (!opt || !opt.value) { $('conn').innerHTML = ''; return; }
+  if (!opt || !opt.value) { $('conn').innerHTML = ''; $('deviceLink').style.display = 'none'; return; }
   const online = opt.dataset.online === 'true';
   $('conn').innerHTML = '<span class="dot ' + (online ? 'on' : 'off') + '"></span>' + (online ? 'online' : 'offline');
+  $('deviceLink').href = '/device/' + opt.value;
+  $('deviceLink').style.display = 'inline';
 };
 </script>
 </body>

@@ -62,7 +62,7 @@
           <tr data-search="<%= [e.title, e.phone, e.kind, e.eventName, e.alarmType, e.alarmNumber].filter(Boolean).join(' ').toLowerCase() %>">
             <td class="mono"><%= e.ts ? new Date(e.ts).toLocaleString() : '' %></td>
             <td class="mono"><%= e.deviceTime || '—' %></td>
-            <td><%= e.title || '—' %></td>
+            <td><% if (e.phone) { %><a class="latlon" style="color:#79b8ff;text-decoration:none" href="/device/<%= e.phone %>"><%= e.title || '—' %></a><% } else { %><%= e.title || '—' %><% } %></td>
             <td class="mono"><%= e.phone || '—' %></td>
             <td>
               <%= e.eventName || '—' %>
