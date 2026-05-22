@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DMS Control Panel</title>
+  <style>
+    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; margin: 0; background: #0e1116; color: #e7eaf0; }
+    header { padding: 14px 20px; background: #161a22; border-bottom: 1px solid #232a36; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+    header h1 { font-size: 16px; margin: 0; }
+    header select { background: #1d232e; color: #e7eaf0; border: 1px solid #2a3140; padding: 6px 10px; border-radius: 4px; font-size: 13px; min-width: 240px; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .dot.on  { background: #22c55e; }
+    .dot.off { background: #ef4444; }
+    main { display: grid; grid-template-columns: minmax(0,1fr) 360px; gap: 0; }
+    nav.tabs { display: flex; gap: 0; border-bottom: 1px solid #232a36; background: #161a22; overflow-x: auto; }
+    nav.tabs button { background: transparent; color: #b9c1d0; border: 0; border-bottom: 2px solid transparent; padding: 10px 14px; cursor: pointer; font-size: 13px; white-space: nowrap; }
+    nav.tabs button.active { color: #fff; border-bottom-color: #79b8ff; }
+    .content { padding: 18px 22px; }
+    section { display: none; }
+    section.active { display: block; }
+    h2 { font-size: 13px; margin: 0 0 12px; color: #b9c1d0; text-transform: uppercase; letter-spacing: 0.5px; }
+    .row { display: grid; grid-template-columns: 180px 1fr; gap: 12px; align-items: center; padding: 6px 0; border-bottom: 1px solid #1d232e; }
+    .row label { font-size: 13px; color: #b9c1d0; }
+    .row input, .row select, .row textarea { background: #1d232e; color: #e7eaf0; border: 1px solid #2a3140; padding: 6px 10px; border-radius: 4px; font-size: 13px; width: 100%; box-sizing: border-box; font-family: inherit; }
+    .row textarea { font-family: ui-monospace, SF Mono, Menlo, Consolas, monospace; min-height: 80px; }
+    .actions { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
+    button.primary { background: #2563eb; color: #fff; border: 0; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 600; }
+    button.primary:hover { background: #1d4ed8; }
+    button.danger { background: #dc2626; color: #fff; border: 0; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    button.secondary { background: #374151; color: #fff; border: 0; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    .mono { font-family: ui-monospace, SF Mono, Menlo, Consolas, monospace; }
+    .hint { font-size: 12px; color: #8a93a3; margin: 0 0 14px; }
+    pre.preview { background: #0a0d12; border: 1px solid #232a36; padding: 8px 10px; border-radius: 4px; font-size: 11px; overflow: auto; max-height: 160px; }
+    aside { background: #11151c; border-left: 1px solid #232a36; min-height: 100vh; padding: 14px 16px; }
+    aside h3 { font-size: 12px; margin: 0 0 8px; color: #b9c1d0; text-transform: uppercase; letter-spacing: 0.5px; }
+    .hist { display: flex; flex-direction: column; gap: 6px; max-height: 80vh; overflow: auto; }
+    .hist .item { background: #161a22; border: 1px solid #232a36; border-radius: 4px; padding: 8px 10px; font-size: 12px; }
+    .hist .top { display: flex; justify-content: space-between; font-family: ui-monospace, SF Mono, Menlo, Consolas, monospace; color: #b9c1d0; }
+    .hist .label { color: #79b8ff; font-size: 11px; margin-top: 2px; }
+    .hist .ack { margin-top: 4px; font-size: 11px; }
+    .ack.ok { color: #22c55e; } .ack.fail { color: #ef4444; } .ack.pending { color: #f59e0b; }
+    .toast { position: fixed; bottom: 16px; right: 16px; background: #161a22; border: 1px solid #2a3140; padding: 10px 14px; border-radius: 6px; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); display: none; max-width: 380px; }
+    .toast.ok  { border-color: #22c55e; }
+    .toast.err { border-color: #ef4444; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    fieldset { border: 1px solid #232a36; border-radius: 6px; padding: 10px 14px 14px; margin: 0 0 14px; }
+    fieldset legend { color: #b9c1d0; padding: 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>DMS Control Panel</h1>
+    <select id="device">
+      <option value="">— select device —</option>
+      <% terminals.forEach(t => { %>
+        <option value="<%= t.phone %>" data-online="<%= t.online %>">
+          <%= t.title || t.phone %> · <%= t.phone %> <%= t.online ? '● online' : '○ offline' %>
+        </option>
+      <% }) %>
+    </select>
+    <span id="conn"></span>
+    <a href="/dashboard" style="color:#79b8ff;text-decoration:none;font-size:13px;margin-left:auto">← Dashboard</a>
+  </header>
+
+  <nav class="tabs">
+    <button class="active" data-tab="network">Network / FTP / CMS</button>
+    <button data-tab="ai">DMS / ADAS</button>
+    <button data-tab="alarm">Alarms & Driving</button>
+    <button data-tab="recording">Recording</button>
+    <button data-tab="vehicle">Vehicle / Driver</button>
+    <button data-tab="say">TTS / Message</button>
+    <button data-tab="raw">Raw 0x8103</button>
+    <button data-tab="transparent">Transparent 0x8900</button>
+    <button data-tab="ctl">Reboot / Reset</button>
+  </nav>
+
+  <main>
+    <div class="content">
+
+    <!-- NETWORK -->
+    <section id="tab-network" class="active">
+      <fieldset>
+        <legend>CMS server (slot 0)</legend>
+        <p class="hint">JT808 platform the device reports to. Slot 0 of <code>NetCms</code>.</p>
+        <div class="row"><label>Enable</label><select id="cms_en"><option value="1">On</option><option value="0">Off</option></select></div>
+        <div class="row"><label>Protocol</label>
+          <select id="cms_proto">
+            <option value="2">JT808-2019</option>
+            <option value="3">JT808-2013</option>
+            <option value="1">CMSv6</option>
+            <option value="0">None</option>
+          </select>
+        </div>
+        <div class="row"><label>Server IP</label><input id="cms_ip" placeholder="13.206.186.1" /></div>
+        <div class="row"><label>Port</label><input id="cms_port" type="number" value="7611" /></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('NetCms', cmsBody)">Send NetCms</button></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>FTP (alarm-video uploads)</legend>
+        <div class="row"><label>Enable</label><select id="ftp_en"><option value="1">On</option><option value="0">Off</option></select></div>
+        <div class="row"><label>Server</label><input id="ftp_host" placeholder="13.206.186.1" /></div>
+        <div class="row"><label>Port</label><input id="ftp_port" type="number" value="2121" /></div>
+        <div class="row"><label>User</label><input id="ftp_user" value="admin" /></div>
+        <div class="row"><label>Password</label><input id="ftp_pwd" value="cmsserverv6" /></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('NetFtp', ftpBody)">Send NetFtp</button></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Wi-Fi (STA)</legend>
+        <div class="row"><label>Mode</label><select id="wifi_mode"><option value="0">Station</option><option value="1">Access Point</option></select></div>
+        <div class="row"><label>SSID</label><input id="wifi_ssid" /></div>
+        <div class="row"><label>Password</label><input id="wifi_pwd" /></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('NetWifi', wifiBody)">Send NetWifi</button></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>4G / Cellular</legend>
+        <div class="row"><label>Enable</label><select id="xg_en"><option value="1">On</option><option value="0">Off</option></select></div>
+        <div class="row"><label>APN</label><input id="xg_apn" placeholder="jionet" /></div>
+        <div class="row"><label>User</label><input id="xg_user" /></div>
+        <div class="row"><label>Password</label><input id="xg_pwd" /></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('NetXg', xgBody)">Send NetXg</button></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Download permissions</legend>
+        <p class="hint">Toggle remote file downloads (audio, face DB, params, firmware).</p>
+        <div class="row"><label>Audio file</label><select id="dl_audio"><option value="1">On</option><option value="0">Off</option></select></div>
+        <div class="row"><label>Face DB</label><select id="dl_face"><option value="1">On</option><option value="0">Off</option></select></div>
+        <div class="row"><label>Param config</label><select id="dl_param"><option value="1">On</option><option value="0">Off</option></select></div>
+        <div class="row"><label>Firmware OTA</label><select id="dl_fw"><option value="1">On</option><option value="0">Off</option></select></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('NetDownload', dlBody)">Send NetDownload</button></div>
+      </fieldset>
+    </section>
+
+    <!-- AI -->
+    <section id="tab-ai">
+      <fieldset>
+        <legend>AiBase</legend>
+        <div class="row"><label>Mode</label><input id="ai_mode" type="number" value="1" /></div>
+        <div class="row"><label>Speed threshold (km/h)</label><input id="ai_spdthr" type="number" value="30" /></div>
+        <div class="row"><label>Hold time (s)</label><input id="ai_hold" type="number" value="3" /></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('AiBase', aiBaseBody)">Send AiBase</button></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>DMS sensitivity (per event)</legend>
+        <p class="hint">Each row sends <code>{AiDms:{Type_NN:{Param:&quot;en,interval,sens,spd1,spd2&quot;}}}</code>. Empty rows are skipped.</p>
+        <% [['00','Fatigue'],['01','Phone'],['02','Smoking'],['03','Eyes closed'],['04','Yawn'],['05','Distracted'],['06','Seatbelt']].forEach(([id,name])=>{ %>
+          <div class="row"><label><%= name %> (Type_<%= id %>)</label><input id="dms_<%= id %>" placeholder="1,5,3,30,80" /></div>
+        <% }) %>
+        <div class="actions"><button class="primary" onclick="sendDms()">Send AiDms</button></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>ADAS sensitivity</legend>
+        <% [['00','LDW (lane departure)'],['01','FCW (forward collision)'],['02','HMW (headway)'],['03','PCW (pedestrian)']].forEach(([id,name])=>{ %>
+          <div class="row"><label><%= name %> (Type_<%= id %>)</label><input id="adas_<%= id %>" placeholder="1,5,3,30,80" /></div>
+        <% }) %>
+        <div class="actions"><button class="primary" onclick="sendAdas()">Send AiAdas</button></div>
+      </fieldset>
+    </section>
+
+    <!-- ALARMS -->
+    <section id="tab-alarm">
+      <fieldset>
+        <legend>Speed alarms (AlmSpd)</legend>
+        <div class="row"><label>Max speed (km/h)</label><input id="spd_max" type="number" value="80" /></div>
+        <div class="row"><label>Min speed (km/h)</label><input id="spd_min" type="number" value="0" /></div>
+        <div class="row"><label>Parking (s)</label><input id="spd_park" type="number" value="600" /></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('AlmSpd', spdBody)">Send AlmSpd</button></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Driving fatigue (Driving)</legend>
+        <div class="row"><label>Pre-tired (min)</label><input id="drv_pt" type="number" value="180" /></div>
+        <div class="row"><label>Tired (min)</label><input id="drv_t" type="number" value="240" /></div>
+        <div class="row"><label>Pre-timeout (min)</label><input id="drv_pto" type="number" value="60" /></div>
+        <div class="row"><label>Timeout (min)</label><input id="drv_to" type="number" value="240" /></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('Driving', drivingBody)">Send Driving</button></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>G-sensor (AlmGsn)</legend>
+        <div class="row"><label>Collision threshold</label><input id="gsn_col" type="number" value="20" /></div>
+        <div class="row"><label>Rapid speed-up</label><input id="gsn_su" type="number" value="15" /></div>
+        <div class="row"><label>Rapid slow-down</label><input id="gsn_sd" type="number" value="15" /></div>
+        <div class="row"><label>Sharp turn</label><input id="gsn_t" type="number" value="20" /></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('AlmGsn', gsnBody)">Send AlmGsn</button></div>
+      </fieldset>
+    </section>
+
+    <!-- RECORDING -->
+    <section id="tab-recording">
+      <fieldset>
+        <legend>RecAttr (recording attributes)</legend>
+        <div class="row"><label>Encoding</label><select id="rec_enc"><option value="1">H.265</option><option value="0">H.264</option></select></div>
+        <div class="row"><label>Clip duration (min)</label><input id="rec_dur" type="number" value="3" /></div>
+        <div class="row"><label>Retention (days)</label><input id="rec_days" type="number" value="14" /></div>
+        <div class="row"><label>Encrypt</label><select id="rec_enc2"><option value="0">Off</option><option value="1">On</option></select></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('RecAttr', recAttrBody)">Send RecAttr</button></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Snapshot (RecCapAttr)</legend>
+        <div class="row"><label>Interval (s)</label><input id="cap_int" type="number" value="60" /></div>
+        <div class="row"><label>Channels (bitmask)</label><input id="cap_ch" type="number" value="3" /></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('RecCapAttr', capBody)">Send RecCapAttr</button></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Recording plan slot 0 (RecPlan)</legend>
+        <p class="hint">Window in HH:MM-HH:MM. Sends <code>{RecPlan:{Index_00:{En, Begin, End}}}</code></p>
+        <div class="row"><label>Enable</label><select id="plan_en"><option value="1">On</option><option value="0">Off</option></select></div>
+        <div class="row"><label>Begin</label><input id="plan_begin" value="00:00" /></div>
+        <div class="row"><label>End</label><input id="plan_end" value="23:59" /></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('RecPlan', planBody)">Send RecPlan</button></div>
+      </fieldset>
+    </section>
+
+    <!-- VEHICLE -->
+    <section id="tab-vehicle">
+      <fieldset>
+        <legend>Vehicle / driver (VehBaseInfo)</legend>
+        <div class="row"><label>Plate</label><input id="veh_plate" /></div>
+        <div class="row"><label>Driver name</label><input id="veh_driver" /></div>
+        <div class="row"><label>License #</label><input id="veh_lic" /></div>
+        <div class="row"><label>Phone</label><input id="veh_phone" /></div>
+        <div class="row"><label>Company</label><input id="veh_company" /></div>
+        <div class="actions"><button class="primary" onclick="sendUlv('VehBaseInfo', vehBody)">Send VehBaseInfo</button></div>
+      </fieldset>
+    </section>
+
+    <!-- TTS -->
+    <section id="tab-say">
+      <fieldset>
+        <legend>Send text / TTS (0x8300)</legend>
+        <p class="hint">Device speaks the text through its cabin speaker (TTS flag set).</p>
+        <div class="row"><label>Text</label><textarea id="say_text" placeholder="Please slow down"></textarea></div>
+        <div class="row"><label>Urgent</label><select id="say_urgent"><option value="0">No</option><option value="1">Yes</option></select></div>
+        <div class="actions"><button class="primary" onclick="sendSay()">Speak</button></div>
+      </fieldset>
+    </section>
+
+    <!-- RAW 0x8103 -->
+    <section id="tab-raw">
+      <fieldset>
+        <legend>Raw 0x8103 Set Terminal Parameters</legend>
+        <p class="hint">Power-user mode. ParamId in decimal or hex (<code>0x64</code>). Value as uint32, string, or hex.</p>
+        <div class="row"><label>Param ID</label><input id="raw_id" placeholder="1  (heartbeat) / 0x64 (ULV-json)" /></div>
+        <div class="row"><label>Value type</label>
+          <select id="raw_vtype">
+            <option value="uint32">uint32 (4-byte int)</option>
+            <option value="string">string (UTF-8)</option>
+            <option value="hex">hex bytes</option>
+          </select>
+        </div>
+        <div class="row"><label>Value</label><input id="raw_val" /></div>
+        <div class="actions"><button class="primary" onclick="sendRaw()">Send 0x8103</button></div>
+      </fieldset>
+    </section>
+
+    <!-- TRANSPARENT -->
+    <section id="tab-transparent">
+      <fieldset>
+        <legend>Transparent 0x8900</legend>
+        <p class="hint">Experimental — pushes arbitrary bytes; if the firmware supports passthrough, this is where your custom-peripheral payloads go.</p>
+        <div class="row"><label>Sub-type (0–255)</label><input id="tp_sub" type="number" value="161" /></div>
+        <div class="row"><label>Payload (hex)</label><input id="tp_hex" placeholder="01 02 03 …" /></div>
+        <div class="actions"><button class="primary" onclick="sendTp()">Send 0x8900</button></div>
+      </fieldset>
+    </section>
+
+    <!-- TERMINAL CONTROL -->
+    <section id="tab-ctl">
+      <fieldset>
+        <legend>Terminal control (0x8105)</legend>
+        <p class="hint">⚠ Destructive. Confirms before sending.</p>
+        <div class="actions">
+          <button class="danger" onclick="ctl(4,'Reboot the device?')">Reboot (0x04)</button>
+          <button class="danger" onclick="ctl(3,'Shut down the device?')">Shutdown (0x03)</button>
+          <button class="danger" onclick="ctl(5,'FACTORY RESET — wipes all config. Continue?')">Factory reset (0x05)</button>
+          <button class="secondary" onclick="ctl(0x64,'Close data comms?')">Close comms (0x64)</button>
+          <button class="secondary" onclick="ctl(0x65,'Reopen data comms?')">Open comms (0x65)</button>
+        </div>
+      </fieldset>
+    </section>
+
+    </div>
+
+    <!-- HISTORY SIDEBAR -->
+    <aside>
+      <h3>Command history</h3>
+      <p class="hint" style="margin-bottom:6px">Last 100 platform → device commands and their ACKs.</p>
+      <div class="hist" id="hist"></div>
+    </aside>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const toast = (msg, kind='ok') => { const t = $('toast'); t.textContent = msg; t.className = 'toast ' + kind; t.style.display = 'block'; setTimeout(()=>{ t.style.display = 'none'; }, 3000); };
+
+document.querySelectorAll('nav.tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav.tabs button').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('section').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  $('tab-' + b.dataset.tab).classList.add('active');
+});
+
+function phone() {
+  const v = $('device').value;
+  if (!v) { toast('Pick a device first', 'err'); throw new Error('no device'); }
+  return v;
+}
+
+async function post(path, body) {
+  try {
+    const r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{}) });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    toast('ACK ' + (j.resultName || 'sent') + (j.replySerial!=null?' (serial '+j.replySerial+')':''),
+          (j.result === 0 ? 'ok' : 'err'));
+    refreshHistory();
+    return j;
+  } catch (e) { toast('FAIL: ' + e.message, 'err'); throw e; }
+}
+
+// ---------- ULV JSON config helpers ----------
+const cmsBody = () => ({ Server_00: { En: +$('cms_en').value, Protocol: +$('cms_proto').value, Server: `${$('cms_ip').value}:${$('cms_port').value}` } });
+const ftpBody = () => ({ En: +$('ftp_en').value, Server: $('ftp_host').value, Port: +$('ftp_port').value, User: $('ftp_user').value, Pwd: $('ftp_pwd').value });
+const wifiBody = () => ({ Mode: +$('wifi_mode').value, Ssid_00: { Ssid: $('wifi_ssid').value, Pwd: $('wifi_pwd').value } });
+const xgBody = () => ({ En: +$('xg_en').value, Apn: $('xg_apn').value, User: $('xg_user').value, Pwd: $('xg_pwd').value });
+const dlBody = () => ({ AudioFileEn: +$('dl_audio').value, FaceFileEn: +$('dl_face').value, ParamConfigEn: +$('dl_param').value, UpgradeEn: +$('dl_fw').value });
+const aiBaseBody = () => ({ Mode: +$('ai_mode').value, SpdThr_AB: +$('ai_spdthr').value, HoldTime: +$('ai_hold').value });
+const spdBody = () => ({ MaxSpd: +$('spd_max').value, MinSpd: +$('spd_min').value, Parking: +$('spd_park').value });
+const drivingBody = () => ({ PreTired: +$('drv_pt').value, Tired: +$('drv_t').value, PreTimeOut: +$('drv_pto').value, TimeOut: +$('drv_to').value });
+const gsnBody = () => ({ Collision: +$('gsn_col').value, SpdUp: +$('gsn_su').value, SlwDown: +$('gsn_sd').value, Turn: +$('gsn_t').value });
+const recAttrBody = () => ({ VencFormat: +$('rec_enc').value, Duration: +$('rec_dur').value, SaveDays: +$('rec_days').value, Encrypt: +$('rec_enc2').value });
+const capBody = () => ({ Interval: +$('cap_int').value, ChnMask: +$('cap_ch').value });
+const planBody = () => ({ Index_00: { En: +$('plan_en').value, Begin: $('plan_begin').value, End: $('plan_end').value } });
+const vehBody = () => ({ CarPlate: $('veh_plate').value, DriverName: $('veh_driver').value, DriverLic: $('veh_lic').value, PhoneNum: $('veh_phone').value, Company: $('veh_company').value });
+
+function sendUlv(paramType, bodyFn) {
+  return post(`/cmd/${phone()}/ulv-json`, { paramType, json: bodyFn() });
+}
+
+function sendDms() {
+  const types = ['00','01','02','03','04','05','06'];
+  const body = {};
+  types.forEach(id => { const v = $('dms_' + id).value.trim(); if (v) body['Type_' + id] = { Param: v }; });
+  if (!Object.keys(body).length) return toast('Fill at least one row', 'err');
+  return post(`/cmd/${phone()}/ulv-json`, { paramType: 'AiDms', json: body });
+}
+function sendAdas() {
+  const types = ['00','01','02','03'];
+  const body = {};
+  types.forEach(id => { const v = $('adas_' + id).value.trim(); if (v) body['Type_' + id] = { Param: v }; });
+  if (!Object.keys(body).length) return toast('Fill at least one row', 'err');
+  return post(`/cmd/${phone()}/ulv-json`, { paramType: 'AiAdas', json: body });
+}
+
+function sendSay() {
+  const text = $('say_text').value.trim();
+  if (!text) return toast('Enter some text', 'err');
+  return post(`/cmd/${phone()}/say`, { text, urgent: +$('say_urgent').value === 1 });
+}
+
+function sendRaw() {
+  let id = $('raw_id').value.trim();
+  id = id.toLowerCase().startsWith('0x') ? parseInt(id, 16) : parseInt(id, 10);
+  if (!Number.isFinite(id)) return toast('Bad param ID', 'err');
+  const vtype = $('raw_vtype').value;
+  const val = $('raw_val').value;
+  const param = { id };
+  if (vtype === 'uint32') param.uint32 = Number(val);
+  else if (vtype === 'hex') param.hex = val.replace(/\s+/g, '');
+  else param.string = val;
+  return post(`/cmd/${phone()}/set-params`, { params: [param] });
+}
+
+function sendTp() {
+  const sub = +$('tp_sub').value;
+  const hex = $('tp_hex').value.replace(/\s+/g, '');
+  return post(`/cmd/${phone()}/transparent`, { subType: sub, hex });
+}
+
+function ctl(action, msg) {
+  if (!confirm(msg)) return;
+  return post(`/cmd/${phone()}/control`, { action });
+}
+
+// ---------- history sidebar ----------
+async function refreshHistory() {
+  try {
+    const r = await fetch('/cmd-history').then(r => r.json());
+    const wrap = $('hist');
+    wrap.innerHTML = '';
+    r.forEach(h => {
+      const div = document.createElement('div');
+      div.className = 'item';
+      const ackState = !h.ack ? 'pending'
+                     : h.ack.result === 0 ? 'ok' : 'fail';
+      const ackText = !h.ack ? 'pending…'
+                    : (h.ack.resultName + (h.ack.error ? ' — ' + h.ack.error : ''));
+      div.innerHTML =
+        `<div class="top">
+           <span>${h.msgIdHex} → ${h.phone}</span>
+           <span>${new Date(h.ts).toLocaleTimeString()}</span>
+         </div>
+         ${h.label ? '<div class="label">' + h.label + '</div>' : ''}
+         <div class="ack ${ackState}">ACK: ${ackText}</div>`;
+      wrap.appendChild(div);
+    });
+  } catch {}
+}
+refreshHistory();
+setInterval(refreshHistory, 2500);
+
+// device connectivity dot
+$('device').onchange = () => {
+  const opt = $('device').selectedOptions[0];
+  if (!opt || !opt.value) { $('conn').innerHTML = ''; return; }
+  const online = opt.dataset.online === 'true';
+  $('conn').innerHTML = '<span class="dot ' + (online ? 'on' : 'off') + '"></span>' + (online ? 'online' : 'offline');
+};
+</script>
+</body>
+</html>

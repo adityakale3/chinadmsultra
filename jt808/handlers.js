@@ -2,6 +2,7 @@ const { encode } = require('./codec');
 const { parseLocation, parseBulkLocation, alcoholFromAlarmFlag } = require('./parse-location');
 const store = require('../store');
 const persist = require('../persist');
+const cmdDispatcher = require('../cmd-dispatcher');
 const mqttPub = require('../mqtt-publisher');
 const alertPub = require('../alert-publisher');
 const { make } = require('../logger');
@@ -169,10 +170,12 @@ function handle(socket, frame) {
   const idHex = '0x' + msgId.toString(16).padStart(4, '0');
   const base = { phone, msgId: idHex, serial, raw: raw.toString('hex') };
 
-  // remember terminal
+  // remember terminal (incl. JT808 version flag so the cmd-dispatcher encodes
+  // outbound headers correctly)
   const term = store.terminals.get(phone) || { phone };
   term.socket = socket;
   term.lastSeen = new Date().toISOString();
+  term.version2019 = !!versionFlag;
   store.terminals.set(phone, term);
 
   switch (msgId) {
@@ -203,8 +206,9 @@ function handle(socket, frame) {
         const resultName = ['ok','fail','msg-error','not-supported'][result] || `r${result}`;
         log.info(`ACK phone=${phone} replyTo=0x${replyId.toString(16).padStart(4,'0')} serial=${replySerial} result=${resultName}`);
         record('msg', { ...base, type: 'ack', parsed: { replyId: '0x' + replyId.toString(16).padStart(4,'0'), replySerial, result, resultName } });
+        cmdDispatcher.registerAck(phone, replySerial, replyId, result);
       }
-      return; // no platform reply for a terminal general response
+      return;
     }
     case 0x0002: { // heartbeat
       send(socket, `0x8001 heartbeat-ack phone=${phone}`, buildGeneralResponse(phone, serial, msgId, 0, v));

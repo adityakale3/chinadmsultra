@@ -187,6 +187,120 @@ app.get('/mqtt-stats',  (_, res) => res.json(mqttPub.stats()));
 app.get('/s3-stats',    (_, res) => res.json(require('./s3-uploader').stats()));
 app.get('/alert-stats',   (_, res) => res.json(require('./alert-publisher').stats()));
 app.get('/persist-stats', (_, res) => res.json(persist.stats()));
+app.get('/cmd-stats',     (_, res) => res.json(require('./cmd-dispatcher').stats()));
+
+// ============================================================================
+// Platform → device commands.  Returns 200 + the device's 0x0001 ACK result,
+// or 4xx/5xx on send/timeout failure.
+//
+// Optional safety: set CMD_TOKEN=... in pm2 env and require header
+// `x-cmd-token: <same>` on every /cmd/* request.
+// ============================================================================
+const cmd = require('./cmd-dispatcher');
+const CMD_TOKEN = process.env.CMD_TOKEN || '';
+function checkAuth(req, res) {
+  if (CMD_TOKEN && req.get('x-cmd-token') !== CMD_TOKEN) {
+    res.status(403).json({ error: 'invalid x-cmd-token' });
+    return false;
+  }
+  return true;
+}
+
+// POST /cmd/:phone/set-params
+//   body: { params: [ { id: 1, value: 20 }, { id: 0x64, value: "{\"AiDms\":{...}}" } ] }
+//   or shorthand: { paramId: 0x64, value: "..." }  for a single param
+app.post('/cmd/:phone/set-params', async (req, res) => {
+  if (!checkAuth(req, res)) return;
+  try {
+    let params = req.body.params;
+    if (!params && req.body.paramId != null) {
+      params = [{ id: Number(req.body.paramId), value: req.body.value }];
+    }
+    if (!Array.isArray(params) || !params.length) {
+      return res.status(400).json({ error: 'body must contain `params` array (or paramId+value)' });
+    }
+    // Allow values passed as { hex: "..." } / { string: "..." } / { uint32: N }
+    params = params.map(p => {
+      const v = p.value !== undefined ? p.value
+              : p.hex ? Buffer.from(p.hex, 'hex')
+              : p.string !== undefined ? p.string
+              : p.uint32 !== undefined ? Number(p.uint32)
+              : null;
+      return { id: Number(p.id), value: v };
+    });
+    const r = await cmd.setParams(req.params.phone, params, { timeoutMs: Number(req.query.timeout)||10_000 });
+    res.json(r);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// POST /cmd/:phone/transparent
+//   body: { subType: 0xa2, hex: "00 01 02 ..." }  (spaces in hex are stripped)
+app.post('/cmd/:phone/transparent', async (req, res) => {
+  if (!checkAuth(req, res)) return;
+  try {
+    const subType = Number(req.body.subType);
+    if (!Number.isFinite(subType) || subType < 0 || subType > 255) {
+      return res.status(400).json({ error: '`subType` (0–255) required' });
+    }
+    const hex = (req.body.hex || '').replace(/\s+/g, '');
+    const r = await cmd.transparent(req.params.phone, subType, hex, { timeoutMs: Number(req.query.timeout)||10_000 });
+    res.json(r);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// POST /cmd/:phone/say   (TTS)
+//   body: { text: "Please slow down", urgent: false }
+app.post('/cmd/:phone/say', async (req, res) => {
+  if (!checkAuth(req, res)) return;
+  try {
+    const text = String(req.body.text || '');
+    if (!text) return res.status(400).json({ error: '`text` required' });
+    const flags = (req.body.urgent ? 0x01 : 0) | 0x08; // TTS-read, optionally urgent
+    const r = await cmd.textMessage(req.params.phone, flags, text);
+    res.json(r);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// POST /cmd/:phone/control
+//   body: { action: 4 }   // 0x04 = reboot, 0x05 = factory reset, etc.
+// POST /cmd/:phone/ulv-json
+//   body: { paramType: "NetCms", json: { Server_00: { ... } } }
+//   Wraps a ULV JSON config blob in a 0x8103 paramId=0x64 set-params frame.
+app.post('/cmd/:phone/ulv-json', async (req, res) => {
+  if (!checkAuth(req, res)) return;
+  try {
+    if (!req.body.json) return res.status(400).json({ error: '`json` body required' });
+    const jsonObj = req.body.paramType
+      ? { [req.body.paramType]: req.body.json }
+      : req.body.json;
+    const payload = JSON.stringify(jsonObj);
+    const r = await cmd.setParams(req.params.phone,
+      [{ id: 0x64, value: payload }],
+      { label: req.body.paramType || 'ulv-json' });
+    res.json({ ...r, sent: payload });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+app.get('/cmd-history', (_, res) => res.json(cmd.listHistory()));
+
+app.get('/control', (_, res) => {
+  const terms = [...store.terminals.values()].map(t => ({
+    phone: t.phone, title: PHONE_TITLES[t.phone] || '',
+    lastSeen: t.lastSeen, registered: !!t.registered,
+    online: !!(t.socket && !t.socket.destroyed),
+  }));
+  res.render('control', { terminals: terms, phoneTitles: PHONE_TITLES });
+});
+
+app.post('/cmd/:phone/control', async (req, res) => {
+  if (!checkAuth(req, res)) return;
+  try {
+    const action = Number(req.body.action);
+    if (!Number.isFinite(action)) return res.status(400).json({ error: '`action` byte required' });
+    const r = await cmd.terminalControl(req.params.phone, action, req.body.param || '');
+    res.json(r);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
 
 // /events — group alarms with their evidence files into one event per alarm.
 // Joins on alarmNumber (the "<phone>-<timestamp>" tag we put in 0x9208).
