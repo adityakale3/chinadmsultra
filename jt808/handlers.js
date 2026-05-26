@@ -5,6 +5,28 @@ const persist = require('../persist');
 const cmdDispatcher = require('../cmd-dispatcher');
 const mqttPub = require('../mqtt-publisher');
 const alertPub = require('../alert-publisher');
+
+// Per-device dedup cache: skip a publishLocation if the same (rounded) lat/lon
+// at the same device-time was already published within DEDUP_WINDOW_MS.
+// Devices commonly emit the same GPS sample via 0x0200 AND 0x0704; without this
+// dedup MySQL/QuestDB ends up with paired duplicates 1-2s apart that show as
+// zig-zag on the map.
+const DEDUP_WINDOW_MS = Number(process.env.LOC_DEDUP_MS || 15_000);
+const lastLocSent = new Map();   // phone → { lat6, lon6, time, sentAt }
+function shouldPublishLoc(phone, lat, lon, time) {
+  if (lat == null || lon == null) return false;
+  if (lat === 0 && lon === 0) return false;
+  // Round to 6 decimals (≈10 cm) to absorb tiny float jitter.
+  const lat6 = Math.round(lat * 1e6);
+  const lon6 = Math.round(lon * 1e6);
+  const now = Date.now();
+  const prev = lastLocSent.get(phone);
+  if (prev && prev.lat6 === lat6 && prev.lon6 === lon6 && prev.time === time && (now - prev.sentAt) < DEDUP_WINDOW_MS) {
+    return false;
+  }
+  lastLocSent.set(phone, { lat6, lon6, time, sentAt: now });
+  return true;
+}
 const { make } = require('../logger');
 const log = make('JT808');
 
@@ -222,7 +244,8 @@ function handle(socket, frame) {
       log.info(`LOCATION phone=${phone} lat=${parsed.lat} lon=${parsed.lon} spd=${parsed.speed_kmh} dir=${parsed.direction} t=${parsed.time} alarms=${(parsed.alarms||[]).join(',') || 'none'}`);
 
       // Publish to MQTT ORG topic (m3 frontend listens here for live tracking).
-      if (typeof mqttPub.publishLocation === 'function' && parsed.lat != null && parsed.lon != null) {
+      if (typeof mqttPub.publishLocation === 'function'
+          && shouldPublishLoc(phone, parsed.lat, parsed.lon, parsed.time)) {
         try {
           mqttPub.publishLocation({
             hmiId: hmiFor(phone),
@@ -295,7 +318,7 @@ function handle(socket, frame) {
       if (typeof mqttPub.publishLocation === 'function') {
         for (const it of parsed.items || []) {
           if (parsed.dataType !== 0) continue;
-          if (it.lat == null || it.lon == null || (it.lat === 0 && it.lon === 0)) continue;
+          if (!shouldPublishLoc(phone, it.lat, it.lon, it.time)) continue;
           try {
             mqttPub.publishLocation({
               hmiId: hmiFor(phone),

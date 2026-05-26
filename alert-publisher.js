@@ -27,6 +27,13 @@ function classify(filename) {
   return 'data';
 }
 
+// JT/T 1078 alarm filename: <type>_<channel>_<alarmType>_<seq>_<alarmNumber>.<ext>
+// Channel 00 = cabin (DSM) camera, 01 = road/front camera in dual-cam units.
+function channelOf(filename) {
+  const m = filename.match(/^\d+_(\d+)_/);
+  return m ? Number(m[1]) : 0;
+}
+
 function queueAlarm(p) {
   const { alarmNumber } = p;
   if (!alarmNumber) {
@@ -40,7 +47,16 @@ function queueAlarm(p) {
   }
   const entry = {
     ...p,
-    media: { image: '', video: '', dashcam: '', data: '' },
+    media: {
+      image:   '',  // jpg/png cabin snapshot
+      img_url: '',  // alias for image (some Lambdas read img_url)
+      video:   '',  // mp4 cabin video
+      media:   '',  // alias for video (matches non-China DMS payload)
+      dashcam: '',  // alias for video
+      inCabin: '',  // explicit cabin-camera URL (channel 0)
+      outRoad: '',  // road/front camera URL (channel 1) — empty for single-cam units
+      bin_url: '',  // .bin metadata blob
+    },
     expectedFiles: p.expectedFiles || 3,
     receivedFiles: 0,
     fired: false,
@@ -60,18 +76,49 @@ async function attachMedia({ alarmNumber, hmiId, localPath, filename }) {
   const entry = pending.get(alarmNumber);
   // Upload to S3 regardless — even orphaned uploads should be archived.
   const url = await s3.uploadFile({ localPath, hmiId: hmiId || entry?.hmiId, alarmNumber, filename });
+  if (!url) log.warn(`S3 upload FAILED for ${filename} (alarmNumber=${alarmNumber}) — check creds, bucket, region`);
+  const kind = classify(filename);
+  const ch = channelOf(filename);
+
+  // Build a delta of media fields this single file affects.
+  function applyFileToMedia(media) {
+    if (!url) return;
+    if (kind === 'video') {
+      media.video = url;
+      media.media = url;
+      media.dashcam = url;
+      if (ch === 0) media.inCabin = url;
+      if (ch === 1) media.outRoad = url;
+    } else if (kind === 'image') {
+      media.image = url;
+      media.img_url = url;
+    } else {
+      media.bin_url = url;
+    }
+  }
+
   if (!entry) {
-    log.debug(`attachMedia: no pending alarm for ${alarmNumber} (orphan upload)`);
+    // Alarm already fired (timeout) or never queued. Publish a follow-up
+    // update so downstream can patch the existing alert row.
+    if (url) {
+      const media = {};
+      applyFileToMedia(media);
+      try {
+        if (typeof mqttPub.publishAlertMediaUpdate === 'function') {
+          mqttPub.publishAlertMediaUpdate({ alarmNumber, media });
+        } else {
+          mqttPub.publishAlert({ alarmNumber, alarmKind: 'MEDIA_LATE', media });
+        }
+        log.info(`alarmNumber=${alarmNumber} late ${kind} URL published as update`);
+      } catch (e) { log.warn(`late media publish failed: ${e.message}`); }
+    } else {
+      log.debug(`attachMedia: no pending alarm for ${alarmNumber} and no S3 url (orphan)`);
+    }
     return;
   }
   entry.receivedFiles++;
-  const kind = classify(filename);
-  if (url) {
-    if (kind === 'video') { entry.media.video = url; entry.media.dashcam = url; }
-    else if (kind === 'image') entry.media.image = url;
-    else entry.media.data = url;
-  }
-  log.info(`alarmNumber=${alarmNumber} got ${kind} (${entry.receivedFiles}/${entry.expectedFiles})`);
+  applyFileToMedia(entry.media);
+  log.info(`alarmNumber=${alarmNumber} got ${kind} ch=${ch} (${entry.receivedFiles}/${entry.expectedFiles}) ${url ? 'S3-ok' : 'S3-FAILED'}`);
   if (entry.receivedFiles >= entry.expectedFiles) fire(alarmNumber, 'complete');
 }
 
