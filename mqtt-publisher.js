@@ -68,20 +68,29 @@ function doPublish(topic, payload) {
 }
 
 // JT808 DSM eventType → Starkenn alert_type (consumed by normalizedJSON2 -> subevent map)
+// Hex codes align with JT808 DSM alarm type bytes (6501–6507, 6532 in the SUBEVENT table)
 const DSM_TO_ALERT = {
-  0x01: { event: 'DMS', alert_type: 'DROWSINESS',  severity: 'HIGH' },
-  0x02: { event: 'DMS', alert_type: 'USING_PHONE', severity: 'HIGH' },
-  0x03: { event: 'DMS', alert_type: 'SMOKING',     severity: 'MEDIUM' },
-  0x04: { event: 'DMS', alert_type: 'DISTRACTION', severity: 'HIGH' },
-  0x05: { event: 'DMS', alert_type: 'NO_DRIVER',   severity: 'HIGH' },
-  0x06: { event: 'DMS', alert_type: 'NO_SEATBELT', severity: 'MEDIUM' },
-  0x32: { event: 'ALC', alert_type: 'ALCOHOL',     severity: 'HIGH' },
+  0x01: { event: 'DMS', alert_type: 'DROWSINESS',  severity: 'HIGH'   }, // 6501
+  0x02: { event: 'DMS', alert_type: 'USING_PHONE', severity: 'LOW'    }, // 6502
+  0x03: { event: 'DMS', alert_type: 'SMOKING',     severity: 'LOW'    }, // 6503
+  0x04: { event: 'DMS', alert_type: 'DISTRACTED',  severity: 'MEDIUM' }, // 6504
+  0x05: { event: 'DMS', alert_type: 'YAWN',        severity: 'LOW'    }, // 6505
+  0x06: { event: 'DMS', alert_type: 'NO_DRIVER',   severity: 'HIGH'   }, // 6506
+  0x07: { event: 'DMS', alert_type: 'NO_SEATBELT', severity: 'LOW'    }, // 6507
+  0x32: { event: 'DMS', alert_type: 'ALCOHOL',     severity: 'HIGH'   }, // 6532
 };
+// ADAS alarm types (6401–6404)
 const ADAS_TO_ALERT = {
-  0x01: { event: 'CAS', alert_type: 'FORWARD_COLLISION',   severity: 'HIGH' },
-  0x02: { event: 'CAS', alert_type: 'LANE_DEVIATION',      severity: 'MEDIUM' },
-  0x03: { event: 'CAS', alert_type: 'CLOSE_DISTANCE',      severity: 'MEDIUM' },
-  0x04: { event: 'CAS', alert_type: 'PEDESTRIAN_COLLISION', severity: 'HIGH' },
+  0x01: { event: 'CAS', alert_type: 'FORWARD_COLLISION', severity: 'HIGH'   }, // 6401
+  0x02: { event: 'CAS', alert_type: 'LANE_DEPARTURE',    severity: 'MEDIUM' }, // 6402
+  0x03: { event: 'CAS', alert_type: 'HEADWAY',           severity: 'MEDIUM' }, // 6403
+  0x04: { event: 'CAS', alert_type: 'PEDESTRIAN',        severity: 'HIGH'   }, // 6404
+};
+// BSD (Blind Spot Detection) alarm types (6601–6603)
+const BSD_TO_ALERT = {
+  0x01: { event: 'BSD', alert_type: 'BSD_REAR',  severity: 'MEDIUM' }, // 6601
+  0x02: { event: 'BSD', alert_type: 'BSD_LEFT',  severity: 'MEDIUM' }, // 6602
+  0x03: { event: 'BSD', alert_type: 'BSD_RIGHT', severity: 'MEDIUM' }, // 6603
 };
 
 function fmtLat(v) { return (v != null && !Number.isNaN(v)) ? Number(v).toFixed(5) : null; }
@@ -122,19 +131,23 @@ function publishLocation({ hmiId, lat, lon, speed_kmh, direction, ignition = 1 }
   doPublish(hmiId, JSON.stringify(payload));
 }
 
-// alarmKind: 'DSM' | 'ADAS' | 'ALCOHOL' (we treat ALCOHOL as 'event:ALC')
-// eventTypeHex: low byte of alarmType from the device (1..6 for DSM, 0x32 for alcohol, 1..4 for ADAS)
+// alarmKind: 'DSM' | 'ADAS' | 'BSD' | 'ALCOHOL'
+// eventTypeHex: low byte of alarmType from the device
+//   DSM:  0x01–0x07, 0x32 (ALCOHOL)
+//   ADAS: 0x01–0x04
+//   BSD:  0x01–0x03
 function publishAlert({ hmiId, alarmKind, eventTypeHex, lat, lon, speed_kmh, direction, alarmNumber, media = {} }) {
   if (!ENABLED) return;
   if (!hmiId) { droppedUnknown++; return; }
   const ts = String(nowSec());
   let mapping;
-  if (alarmKind === 'ALCOHOL' || eventTypeHex === 0x32) {
-    mapping = DSM_TO_ALERT[0x32];
-  } else if (alarmKind === 'DSM') {
-    mapping = DSM_TO_ALERT[eventTypeHex];
+  if (alarmKind === 'DSM' || alarmKind === 'ALCOHOL') {
+    // ALCOHOL arrives with eventTypeHex=0x32 from the device; DSM_TO_ALERT covers it
+    mapping = DSM_TO_ALERT[alarmKind === 'ALCOHOL' ? 0x32 : eventTypeHex];
   } else if (alarmKind === 'ADAS') {
     mapping = ADAS_TO_ALERT[eventTypeHex];
+  } else if (alarmKind === 'BSD') {
+    mapping = BSD_TO_ALERT[eventTypeHex];
   }
   if (!mapping) { droppedInvalid++; return; }
 

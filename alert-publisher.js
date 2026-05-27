@@ -18,6 +18,50 @@ const log = make('ALERT');
 const FIRE_TIMEOUT_MS = Number(process.env.ALERT_FIRE_TIMEOUT_MS || 90_000);
 const RETENTION_MS    = Number(process.env.ALERT_RETENTION_MS    || 5 * 60 * 1000);
 
+// Single source of truth for alert categorisation. Keyed by the 4-digit hex
+// alarm code that the device puts in the file-name AND that we can synthesize
+// from (channel byte, event-type byte). Values match what the m3 backend stores
+// in the QuestDB `event` / `subevent` columns and the `data.alert_type` /
+// `data.severity` JSON fields.
+const SUBEVENT_MAP = {
+  // DSM (cabin camera, channel 0x65)
+  '6501': { event: 'DMS', subevent: 'DROW', alertType: 'DROWSINESS',           severity: 'HIGH'   },
+  '6502': { event: 'DMS', subevent: 'PHO',  alertType: 'USING_PHONE',          severity: 'LOW'    },
+  '6503': { event: 'DMS', subevent: 'SMOK', alertType: 'SMOKING',              severity: 'LOW'    },
+  '6504': { event: 'DMS', subevent: 'DIST', alertType: 'DISTRACTED',           severity: 'MEDIUM' },
+  '6505': { event: 'DMS', subevent: 'YAWN', alertType: 'YAWN',                 severity: 'LOW'    },
+  '6506': { event: 'DMS', subevent: 'NDRV', alertType: 'NO_DRIVER',            severity: 'HIGH'   },
+  '6507': { event: 'DMS', subevent: 'BELT', alertType: 'NO_SEATBELT',          severity: 'LOW'    },
+  '6532': { event: 'DMS', subevent: 'ALCO', alertType: 'ALCOHOL',              severity: 'HIGH'   },
+  // ADAS / Collision Avoidance (road camera, channel 0x64)
+  '6401': { event: 'CAS', subevent: 'CAS',  alertType: 'FORWARD_COLLISION',    severity: 'HIGH'   },
+  '6402': { event: 'CAS', subevent: 'LDW',  alertType: 'LANE_DEPARTURE',       severity: 'MEDIUM' },
+  '6403': { event: 'CAS', subevent: 'HMW',  alertType: 'HEADWAY',              severity: 'MEDIUM' },
+  '6404': { event: 'CAS', subevent: 'PCW',  alertType: 'PEDESTRIAN',           severity: 'HIGH'   },
+  '6405': { event: 'CAS', subevent: 'FLC',  alertType: 'FREQUENT_LANE_CHANGE', severity: 'LOW'    },
+  '6406': { event: 'CAS', subevent: 'RSO',  alertType: 'ROAD_SIGN_OVERRUN',    severity: 'MEDIUM' },
+  '6407': { event: 'CAS', subevent: 'OBS',  alertType: 'OBSTACLE',             severity: 'HIGH'   },
+  // BSD (side cameras, channel 0x66)
+  '6601': { event: 'BSD', subevent: 'BSDR', alertType: 'BSD_REAR',             severity: 'MEDIUM' },
+  '6602': { event: 'BSD', subevent: 'BSDL', alertType: 'BSD_LEFT',             severity: 'MEDIUM' },
+  '6603': { event: 'BSD', subevent: 'BSDF', alertType: 'BSD_RIGHT',            severity: 'MEDIUM' },
+};
+
+const CHANNEL_BY_KIND = { DSM: 0x65, ADAS: 0x64, BSD: 0x66, ALCOHOL: 0x65 };
+
+// Returns { alarmCode, event, subevent, alertType, severity } given the kind
+// (DSM/ADAS/BSD/ALCOHOL) and the event-type byte from the JT/T 1078 alarm extra.
+function classifyAlarm({ alarmKind, eventTypeHex }) {
+  const ch = CHANNEL_BY_KIND[alarmKind];
+  if (!ch || eventTypeHex == null) {
+    return { alarmCode: null, event: alarmKind || 'UNKN', subevent: 'UNKN', alertType: 'UNKNOWN', severity: 'LOW' };
+  }
+  const code = ((ch << 8) | (eventTypeHex & 0xff)).toString(16).padStart(4, '0');
+  const found = SUBEVENT_MAP[code];
+  return { alarmCode: '0x' + code,
+           ...(found || { event: alarmKind, subevent: 'UNKN', alertType: 'UNKNOWN', severity: 'LOW' }) };
+}
+
 const pending = new Map();   // alarmNumber → entry
 
 function classify(filename) {
@@ -45,8 +89,10 @@ function queueAlarm(p) {
     log.debug(`queueAlarm ignored duplicate alarmNumber=${alarmNumber}`);
     return;
   }
+  const cls = classifyAlarm({ alarmKind: p.alarmKind, eventTypeHex: p.eventTypeHex });
   const entry = {
     ...p,
+    classification: cls,
     media: {
       image:   '',  // jpg/png cabin snapshot
       img_url: '',  // alias for image (some Lambdas read img_url)
@@ -63,7 +109,7 @@ function queueAlarm(p) {
     timer: setTimeout(() => fire(alarmNumber, 'timeout'), FIRE_TIMEOUT_MS),
   };
   pending.set(alarmNumber, entry);
-  log.info(`queue alarmNumber=${alarmNumber} hmi=${p.hmiId} kind=${p.alarmKind} ev=0x${(p.eventTypeHex||0).toString(16)}`);
+  log.info(`queue alarmNumber=${alarmNumber} hmi=${p.hmiId} code=${cls.alarmCode} → ${cls.event}/${cls.subevent} ${cls.alertType} (${cls.severity})`);
 }
 
 // File 1210/1211 metadata arrived; we can use this to know the expected count.
@@ -127,11 +173,18 @@ function fire(alarmNumber, reason) {
   if (!e || e.fired) return;
   e.fired = true;
   clearTimeout(e.timer);
-  log.info(`fire alarmNumber=${alarmNumber} reason=${reason} files=${e.receivedFiles}/${e.expectedFiles}`);
+  log.info(`fire alarmNumber=${alarmNumber} reason=${reason} files=${e.receivedFiles}/${e.expectedFiles} → ${e.classification.event}/${e.classification.subevent}`);
   mqttPub.publishAlert({
     hmiId: e.hmiId,
     alarmKind: e.alarmKind,
     eventTypeHex: e.eventTypeHex,
+    // Categorisation fields — m3 backend reads these directly into QuestDB
+    // event / subevent columns and into data.alert_type / data.severity.
+    event:     e.classification.event,
+    subevent:  e.classification.subevent,
+    alertType: e.classification.alertType,
+    severity:  e.classification.severity,
+    alarmCode: e.classification.alarmCode,
     lat: e.lat, lon: e.lon,
     speed_kmh: e.speed_kmh, direction: e.direction,
     alarmNumber,
@@ -145,4 +198,4 @@ function stats() {
   return { pending: pending.size, fireTimeoutMs: FIRE_TIMEOUT_MS };
 }
 
-module.exports = { queueAlarm, attachMedia, setExpectedFiles, stats };
+module.exports = { queueAlarm, attachMedia, setExpectedFiles, stats, classifyAlarm, SUBEVENT_MAP };
